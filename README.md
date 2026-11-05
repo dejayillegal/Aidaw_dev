@@ -1,0 +1,55 @@
+# AIDAW
+
+AIDAW is a browser-based, AI-assisted techno digital audio workstation built with React, TypeScript, and Vite. Its intended workflow brings composition, arrangement editing, inspection, and AI-assisted proposals into one workspace, with synthesis and effects powered by the Web Audio API.
+
+## Project status
+
+This repository is the source for the web application. The current package scripts expose Vite development, build, and preview commands. Build and runtime status have not been independently verified for the current repository revision; inspect and type-check the source before treating a build as release-ready.
+
+There is no checked-in Capacitor Android project or debug APK at this time. Android packaging is a planned integration and must not be described as complete until the Android project builds and is tested on target devices.
+
+## Requirements
+
+- Node.js and npm compatible with the project's Vite/TypeScript dependencies
+- For Android packaging: Java JDK, Android SDK, and Gradle/Android Studio in addition to the web requirements
+
+## Web development
+
+```sh
+npm install
+npm run dev
+```
+
+Build and preview:
+
+```sh
+npm run build
+npm run preview
+```
+
+`npm run build` runs `vite build`. No test or type-check script is currently defined in `package.json`; do not assume tests have run just because a build completes.
+
+## Android packaging (planned)
+
+The intended first Android milestone is a Capacitor wrapper around the existing web application, with the web bundle packaged locally. The following commands apply only after Capacitor configuration and Android platform scaffolding have been added and verified:
+
+```sh
+npm install
+npm run build
+npx cap init
+npx cap add android
+npx cap sync android
+cd android && ./gradlew assembleDebug
+```
+
+A successful Gradle build is not device qualification. Verify install/startup, audio focus and interruptions, file export, and phone/tablet behavior on actual Android targets. Background playback is not supported unless a separately tested native media-service integration is implemented.
+
+## Architecture and preservation
+
+Keep the existing composition and audio behavior intact when changing the application. In particular, preserve the unified workspace, composition grammar and multi-section arrangement, transition atoms, shared playback/export scheduling and graph, and genuine sidechain processing. Avoid replacing the arrangement generator with a simpler loop generator.
+
+See [AGENTS.md](AGENTS.md) for change-safety guidance and [SKILLS.md](SKILLS.md) for common repository workflows and verification expectations.
+
+## Evidence and release gates
+
+Report each verification gate as **PASS**, **FAIL**, **BLOCKED**, or **NOT TESTED**, with the command/device/build identity and evidence. Network/toolchain restrictions must be recorded as blocked, not passed. A successful build alone does not qualify audio behavior, Android reliability, or the complete user journey.
