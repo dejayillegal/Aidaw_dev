@@ -1,71 +1,67 @@
-import type { AutoLane, AutoParam, Clip, ComposeParams, Note, Project, ScCfg, ScGroup, Section, SectionRole, Track } from './types';
-import { Rng, clamp, degree, euclid, hash } from './theory';
-import { ATOM_LAYERS, FORMS, GROUP_ORDER, LAYERS, ROLE_NAMES, ROLE_RULES, STYLES, type LayerDef, type StyleDef } from './styles';
+import type { ScaleId } from './types';
 
-type PN = Note & { pri: number };
-interface Ctx { rng: Rng; style: StyleDef; P: ComposeParams; R: number }
-
-export function defaultSc(): Record<ScGroup, ScCfg> {
-  return {
-    bass: { thr: -26, ratio: 6, atk: 1, rel: 170, hpf: 60, mix: 1, knee: 6 },
-    harm: { thr: -28, ratio: 4, atk: 2, rel: 230, hpf: 60, mix: 1, knee: 8 },
-    fx: { thr: -26, ratio: 3, atk: 3, rel: 280, hpf: 60, mix: 0.9, knee: 10 },
-  };
-}
-
-export function defaultParams(style = 'hypnotic', seed = 1337): ComposeParams {
-  const s = STYLES[style];
-  return {
-    style, form: 'auto', bpm: Math.round((s.bpm[0] + s.bpm[1]) / 2), key: 9, scale: s.scales[0],
-    bars: 176, seed, density: 0.6, complexity: 0.5, swing: s.swing, acid: 0.5, poly: 0.5,
-    dirt: s.dirt, depth: 0.5, mode: 'hybrid',
-  };
-}
-
-// ───────────────────────── clip helpers ─────────────────────────
-export const mkId = (() => { let n = 0; return (p: string) => `${p}_${(n++).toString(36)}_${Date.now().toString(36)}`; })();
-
-export function mkClip(start: number, len: number, loop: number, notes: Note[], label: string, off = 0): Clip {
-  return { id: mkId('c'), start, len, loop, off: ((off % loop) + loop) % loop, notes, gain: 1, mute: false, label, transpose: 0 };
-}
-
-/** remove the span [a,b) from a track's clips, splitting where needed (keeps loop phase) */
-export function carve(track: Track, a: number, b: number) {
-  const out: Clip[] = [];
-  for (const c of track.clips) {
-    const e = c.start + c.len;
-    if (e <= a + 1e-6 || c.start >= b - 1e-6) { out.push(c); continue; }
-    if (c.start < a - 1e-6) out.push({ ...c, len: a - c.start });
-    if (e > b + 1e-6) {
-      out.push({ ...c, id: c.start < a ? mkId('c') : c.id, start: b, len: e - b, off: (((c.off + (b - c.start) * 16) % c.loop) + c.loop) % c.loop });
-    }
+export class Rng {
+  private s: number;
+  constructor(seed: number) { this.s = (seed >>> 0) || 1; }
+  next(): number {
+    this.s = (this.s + 0x6d2b79f5) >>> 0;
+    let t = this.s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   }
-  track.clips = out.filter((c) => c.len > 1e-6);
+  range(a: number, b: number) { return a + (b - a) * this.next(); }
+  int(a: number, b: number) { return Math.floor(this.range(a, b + 1)); }
+  chance(p: number) { return this.next() < p; }
+  pick<T>(arr: T[]): T { return arr[Math.floor(this.next() * arr.length)]; }
 }
 
-export const thin = (notes: PN[], level: number): Note[] => {
-  let keep = notes.filter((n) => n.pri <= level + 1e-9);
-  if (!keep.length && level > 0.05 && notes.length) keep = [notes.reduce((a, b) => (a.pri <= b.pri ? a : b))];
-  return keep.map(({ pri, ...n }) => ({ ...n }));
+export function hash(...parts: (string | number)[]): number {
+  let h = 2166136261;
+  for (const ch of parts.join('|')) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+
+export const SCALES: Record<ScaleId, number[]> = {
+  phrygian: [0, 1, 3, 5, 7, 8, 10],
+  dorian: [0, 2, 3, 5, 7, 9, 10],
+  locrian: [0, 1, 3, 5, 6, 8, 10],
+  minor: [0, 2, 3, 5, 7, 8, 10],
+  harmonicMinor: [0, 2, 3, 5, 7, 8, 11],
+  phrygianDominant: [0, 1, 4, 5, 7, 8, 10],
+  octatonic: [0, 1, 3, 4, 6, 7, 9, 10],
 };
+export const SCALE_NAMES: Record<ScaleId, string> = {
+  phrygian: 'Phrygian', dorian: 'Dorian', locrian: 'Locrian', minor: 'Natural Minor',
+  harmonicMinor: 'Harmonic Minor', phrygianDominant: 'Phrygian Dominant', octatonic: 'Octatonic',
+};
+export const KEY_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
-export function mutate(notes: Note[], loop: number, kind: 'oct' | 'rot' | 'frag' | 'rest' | 'acc', rng: Rng): Note[] {
-  const ns = notes.map((n) => ({ ...n }));
-  switch (kind) {
-    case 'oct': ns.forEach((n) => { if (rng.chance(0.25)) n.p += rng.chance(0.7) ? 12 : -12; }); return ns;
-    case 'acc': ns.forEach((n) => { if (rng.chance(0.3)) { n.acc = true; n.v = 1; } }); return ns;
-    case 'rot': { const r = rng.pick([2, 4, 3]); ns.forEach((n) => { n.t = (n.t + r) % loop; }); return ns.sort((a, b) => a.t - b.t); }
-    case 'frag': return ns.filter((n) => n.t < loop / 2);
-    case 'rest': return ns.length > 3 ? ns.filter(() => !rng.chance(0.2)) : ns;
-  }
+/** pitch of scale degree (may be negative / > length) relative to root midi note */
+export function degree(root: number, scale: ScaleId, deg: number): number {
+  const sc = SCALES[scale];
+  const n = sc.length;
+  const oct = Math.floor(deg / n);
+  const idx = ((deg % n) + n) % n;
+  return root + oct * 12 + sc[idx];
 }
 
-// ... rest of file unchanged (omitted for brevity in this patch) — the update is only for mkId and project revision defaults below.
+export function euclid(k: number, n: number, rot = 0): boolean[] {
+  const out: boolean[] = [];
+  for (let i = 0; i < n; i++) out.push(((i * k) % n) < k);
+  // normalise so that step 0 is a hit then rotate
+  const r = ((rot % n) + n) % n;
+  return out.map((_, i) => out[(i - r + n) % n]);
+}
 
-export function newProject(P: ComposeParams, o: GenOpts = {}, name?: string): Project {
-  const g = generate(P, o);
-  return {
-    v: 1, revision: 1, name: name ?? `${STYLES[P.style].name} · ${P.seed}`, params: P, formId: g.formId, sections: g.sections, tracks: g.tracks, auto: g.auto,
-    sc: defaultSc(), scOn: true, overrides: o.overrides ?? {}, secSeed: o.secSeed ?? {}, loop: { on: false, a: 0, b: 0 },
+export const midiHz = (m: number) => 440 * Math.pow(2, (m - 69) / 12);
+export const clamp = (x: number, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+export const uid = (() => {
+  let n = 0;
+  return (p = 'id') => {
+    const id = `${p}_${n.toString(36)}`;
+    n += 1;
+    return id;
   };
-}
+})();

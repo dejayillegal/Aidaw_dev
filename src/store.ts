@@ -1,47 +1,93 @@
-import type { AutoLane, AutoParam, Project, Selection, Track } from './types';
-import { totalBars } from './types';
-import { applyCommand, type Command } from './commands';
-import { addTransition, carve, generate, mergeGenerated, mkClip, mutate, regenSection, defaultSc } from './composer';
-import { Rng, clamp, euclid, hash, uid } from './theory';
-import { LAYERS, STYLES } from './styles';
-import { diagnose, type FixId } from './diagnostics';
+import { store, engine } from './store';
+import { interpret, buildProposal, type Proposal } from './engine/assist';
+import { regenSection, generate, mergeGenerated, mkClip } from './engine/composer';
+import type { Command } from './engine/commands';
+import type { ComposeParams } from './engine/types';
+import { totalBars } from './engine/types';
 
-export type DiffKind = 'added' | 'changed';
-export interface Proposal {
-  id: string; title: string; rationale: string; cmd: Command; preview: Project;
-  baseRevision: number;
-  diff: Record<string, DiffKind>; removed: { track: string; start: number; len: number }[];
-  stats: { added: number; removed: number; changed: number; lanes: number; mixer: number };
-}
-export type AssistResult = { proposal: Proposal } | { message: string };
+export function acceptProposal(id: string) {
+  const pr = store.get().proposals.find((p) => p.id === id);
+  if (!pr) return;
 
-const clone = <T,>(x: T): T => structuredClone(x);
-
-function clipSig(c: { start: number; len: number; loop: number; off: number; mute: boolean; gain: number; transpose: number; notes: { t: number; p: number; v: number; d: number; acc?: boolean }[] }) {
-  return `${c.start}|${c.len}|${c.loop}|${c.off}|${c.mute}|${c.gain}|${c.transpose}|` + c.notes.map((n) => `${n.t}:${n.p}:${n.v}:${n.d}:${n.acc ? 1 : 0}`).join(',');
-}
-
-export function buildProposal(base: Project, title: string, rationale: string, patch: Extract<Command, { type: 'PATCH' }>['patch']): Proposal {
-  const cmd: Command = { type: 'PATCH', patch };
-  const preview = applyCommand(base, cmd);
-  const diff: Record<string, DiffKind> = {}; const removed: Proposal['removed'] = [];
-  let added = 0, rem = 0, changed = 0;
-  const baseClips = new Map<string, { sig: string; track: string; start: number; len: number }>();
-  for (const t of base.tracks) for (const c of t.clips) baseClips.set(c.id, { sig: clipSig(c), track: t.id, start: c.start, len: c.len });
-  const seen = new Set<string>();
-  for (const t of preview.tracks) for (const c of t.clips) {
-    seen.add(c.id); const b = baseClips.get(c.id);
-    if (!b) { diff[c.id] = 'added'; added++; } else if (b.sig !== clipSig(c)) { diff[c.id] = 'changed'; changed++; }
+  const current = store.get().project;
+  const currentRevision = current.revision ?? 1;
+  if (pr.baseRevision !== currentRevision) {
+    store.dropProposal(id);
+    store.say('ai', `Proposal “${pr.title}” is stale; regenerate it before accepting.`);
+    return;
   }
-  baseClips.forEach((v, id) => { if (!seen.has(id)) { rem++; if (preview.tracks.some((t) => t.id === v.track)) removed.push({ track: v.track, start: v.start, len: v.len }); } });
-  const lanes = JSON.stringify(preview.auto) === JSON.stringify(base.auto) ? 0 : preview.auto.filter((l) => JSON.stringify(base.auto.find((b) => b.id === l.id)) !== JSON.stringify(l)).length;
-  let mixer = 0;
-  for (const t of preview.tracks) {
-    const o = base.tracks.find((x) => x.id === t.id);
-    if (!o || JSON.stringify({ ...o, clips: [] }) !== JSON.stringify({ ...t, clips: [] })) mixer++;
-  }
-  if (JSON.stringify(base.sc) !== JSON.stringify(preview.sc) || base.scOn !== preview.scOn) mixer++;
-  return { id: uid('prop'), title, rationale, cmd, preview: { ...preview, revision: base.revision + 1 }, baseRevision: base.revision ?? 1, diff, removed, stats: { added, removed: rem, changed, lanes, mixer } };
+
+  store.dispatch(pr.cmd, `AI · ${pr.title}`, 'ai');
+  store.dropProposal(id);
+  store.say('ai', `Applied “${pr.title}”. It is in the undo history, tagged AI.`);
 }
 
-// ... file unchanged beyond this additional field.
+export function rejectProposal(id: string) { store.dropProposal(id); }
+export function offerProposal(pr: Proposal) { store.addProposal(pr); }
+
+export function runAssist(text: string) {
+  const s = store.get(); if (!text.trim()) return;
+  store.say('user', text);
+  const r = interpret(text, s.project, s.selection, engine.playing ? Math.max(0, engine.getStep() / 16) : s.cursorBar);
+  if ('message' in r) { store.say('ai', r.message); return; }
+  const st = r.proposal.stats;
+  if (!st.added && !st.removed && !st.changed && !st.lanes && !st.mixer) { store.say('ai', `${r.proposal.title}: nothing to change — the project already satisfies this.`); return; }
+  store.addProposal(r.proposal);
+  store.say('ai', `${r.proposal.title}: ghost preview on the timeline (+${st.added} / −${st.removed} / ~${st.changed} clips, ${st.lanes} automation lanes, ${st.mixer} mixer/routing changes). Audition and accept are enabled while the proposal still matches the project revision.`);
+}
+
+export function seek(bar: number) {
+  const b = Math.max(0, Math.round(bar * 4) / 4);
+  store.setCursor(b);
+  if (store.get().playing) void engine.play(b);
+}
+
+/** Compose → generate through the command bus (undoable, attributed to the composer) */
+export function composeGenerate(mode: 'new' | 'keep' | 'rig', patch?: Partial<ComposeParams>) {
+  const s = store.get(); const params = { ...s.project.params, ...patch };
+  if (mode === 'rig') {
+    const gen = generate(params, { rig: true });
+    store.dispatch({ type: 'PATCH', patch: { tracks: gen.tracks, auto: [], sections: gen.sections, params, formId: gen.formId, secSeed: {}, overrides: {} } }, 'Genre starter rig', 'composer');
+    return;
+  }
+  if (mode === 'new') {
+    const gen = generate(params, { overrides: {} });
+    const m = mergeGenerated(s.project, gen, false);
+    store.dispatch({ type: 'PATCH', patch: { ...m, params, secSeed: {}, overrides: {} } }, `Compose · ${params.style} · seed ${params.seed}`, 'composer');
+  } else {
+    const gen = generate(params, { sections: s.project.sections, secSeed: s.project.secSeed, overrides: s.project.overrides });
+    const m = mergeGenerated({ ...s.project, params }, gen, true);
+    store.dispatch({ type: 'PATCH', patch: { ...m, params } }, 'Compose · regenerate (keep structure)', 'composer');
+  }
+  store.stop();
+}
+
+export function setLayerLevel(secId: string, layer: string, level: number | null) {
+  const s = store.get(); const key = `${secId}:${layer}`;
+  const cmds: Command[] = [{ type: 'SET_OVERRIDE', key, value: level }];
+  const base = { ...s.project, overrides: { ...s.project.overrides } };
+  if (level === null) delete base.overrides[key]; else base.overrides[key] = level;
+  const r = regenSection(base, secId, layer);
+  cmds.push({ type: 'PATCH', patch: { tracks: r.tracks, auto: r.auto, secSeed: s.project.secSeed } });
+  store.dispatch({ type: 'BATCH', cmds }, `Layer matrix · ${layer} @ ${s.project.sections.find((x) => x.id === secId)?.name}`, 'composer');
+}
+
+export function regenerateSectionNow(secId: string) {
+  const s = store.get(); const r = regenSection(s.project, secId);
+  store.dispatch({ type: 'PATCH', patch: r }, 'Regenerate section', 'composer');
+}
+
+export function newClipAt(trackId: string, bar: number) {
+  const s = store.get();
+  const c = mkClip(Math.max(0, Math.floor(bar)), Math.min(4, Math.max(1, totalBars(s.project) - Math.floor(bar))), 16, [], 'New clip');
+  store.dispatch({ type: 'ADD_CLIP', track: trackId, clip: c }, 'Create clip');
+  store.select({ kind: 'clip', id: c.id, track: trackId });
+}
+
+export function splitSelectedAtPlayhead() {
+  const s = store.get(); if (s.selection.kind !== 'clip') return;
+  const bar = engine.playing ? engine.getStep() / 16 : s.cursorBar;
+  store.dispatch({ type: 'SPLIT_CLIP', id: s.selection.id, at: Math.round(bar * 4) / 4 }, 'Split clip');
+}
+
+export { buildProposal };
