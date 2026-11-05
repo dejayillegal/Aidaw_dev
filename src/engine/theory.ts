@@ -1,60 +1,121 @@
-import type { ScaleId } from './types';
+// Canonical project model — framework-free (no React / DOM dependencies).
 
-export class Rng {
-  private s: number;
-  constructor(seed: number) { this.s = (seed >>> 0) || 1; }
-  next(): number {
-    this.s = (this.s + 0x6d2b79f5) >>> 0;
-    let t = this.s;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  }
-  range(a: number, b: number) { return a + (b - a) * this.next(); }
-  int(a: number, b: number) { return Math.floor(this.range(a, b + 1)); }
-  chance(p: number) { return this.next() < p; }
-  pick<T>(arr: T[]): T { return arr[Math.floor(this.next() * arr.length)]; }
+export type SynthKind =
+  | 'kick' | 'sub' | 'rumble' | 'midbass' | 'hat' | 'ohat' | 'ride' | 'shaker' | 'clap' | 'snare'
+  | 'perc' | 'conga' | 'tom' | 'clang' | 'acid' | 'stab' | 'lead' | 'arp' | 'pad' | 'dubchord'
+  | 'drone' | 'noise' | 'crackle' | 'riser' | 'impact' | 'downlift' | 'crash';
+
+export type ScGroup = 'bass' | 'harm' | 'fx';
+export type LayerGroup = 'Foundation' | 'Groove' | 'Character' | 'Harmony' | 'Texture' | 'Transition';
+
+export type SectionRole =
+  | 'INTRO' | 'GROOVE_BUILD' | 'BASS_ENTRANCE' | 'PLATEAU' | 'REDUCTION'
+  | 'BUILD_UP' | 'DROP_PRIMARY' | 'VARIATION' | 'DROP_PEAK' | 'OUTRO';
+
+export type ScaleId = 'phrygian' | 'dorian' | 'locrian' | 'minor' | 'harmonicMinor' | 'phrygianDominant' | 'octatonic';
+export type ProdMode = 'clean' | 'hybrid' | 'industrial';
+
+export interface Note {
+  t: number;        // start in 16th-steps inside the clip loop (float allowed for rolls)
+  d: number;        // duration in steps
+  p: number;        // MIDI pitch
+  v: number;        // velocity 0..1
+  acc?: boolean;    // 303 accent
+  slide?: boolean;  // glide INTO this note from the previous one
+  micro?: number;   // micro-timing in steps (+/-)
+  prob?: number;    // probability 0..1
 }
 
-export function hash(...parts: (string | number)[]): number {
-  let h = 2166136261;
-  for (const ch of parts.join('|')) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
-  return h >>> 0;
+export interface Clip {
+  id: string;
+  start: number;    // bars
+  len: number;      // bars
+  loop: number;     // independent loop length in steps (polymetric)
+  off: number;      // loop phase offset in steps
+  notes: Note[];
+  gain: number;
+  mute: boolean;
+  label: string;
+  transpose: number;
 }
 
-export const SCALES: Record<ScaleId, number[]> = {
-  phrygian: [0, 1, 3, 5, 7, 8, 10],
-  dorian: [0, 2, 3, 5, 7, 9, 10],
-  locrian: [0, 1, 3, 5, 6, 8, 10],
-  minor: [0, 2, 3, 5, 7, 8, 10],
-  harmonicMinor: [0, 2, 3, 5, 7, 8, 11],
-  phrygianDominant: [0, 1, 4, 5, 7, 8, 10],
-  octatonic: [0, 1, 3, 4, 6, 7, 9, 10],
-};
-export const SCALE_NAMES: Record<ScaleId, string> = {
-  phrygian: 'Phrygian', dorian: 'Dorian', locrian: 'Locrian', minor: 'Natural Minor',
-  harmonicMinor: 'Harmonic Minor', phrygianDominant: 'Phrygian Dominant', octatonic: 'Octatonic',
-};
-export const KEY_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-
-/** pitch of scale degree (may be negative / > length) relative to root midi note */
-export function degree(root: number, scale: ScaleId, deg: number): number {
-  const sc = SCALES[scale];
-  const n = sc.length;
-  const oct = Math.floor(deg / n);
-  const idx = ((deg % n) + n) % n;
-  return root + oct * 12 + sc[idx];
+export interface Track {
+  id: string;
+  layer: string;
+  name: string;
+  color: string;
+  group: LayerGroup;
+  synth: SynthKind;
+  vol: number;      // linear gain
+  pan: number;      // -1..1
+  mute: boolean;
+  solo: boolean;
+  lock: boolean;
+  sc: ScGroup | null;
+  rev: number;      // reverb send 0..1
+  del: number;      // delay send 0..1
+  cutoff: number;   // static filter offset 0..1 (0.5 = neutral)
+  res: number;      // static resonance 0..1
+  clips: Clip[];
 }
 
-export function euclid(k: number, n: number, rot = 0): boolean[] {
-  const out: boolean[] = [];
-  for (let i = 0; i < n; i++) out.push(((i * k) % n) < k);
-  // normalise so that step 0 is a hit then rotate
-  const r = ((rot % n) + n) % n;
-  return out.map((_, i) => out[(i - r + n) % n]);
+export interface Section {
+  id: string;
+  role: SectionRole;
+  name: string;
+  start: number;    // bars
+  bars: number;
+  energy: number;   // 0..1
+  lock: boolean;
+  levels: Record<string, number>; // computed layer activity 0..1 (read-only view; derived at generation)
 }
 
-export const midiHz = (m: number) => 440 * Math.pow(2, (m - 69) / 12);
-export const clamp = (x: number, a = 0, b = 1) => Math.min(b, Math.max(a, x));
-export const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-export const uid = (() => { let n = 0; return (p = 'id') => `${p}_${Date.now().toString(36)}${(n++).toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`; })();
+export type AutoParam = 'cutoff' | 'res' | 'rev' | 'vol' | 'hp';
+export interface AutoPoint { bar: number; v: number }
+export interface AutoLane { id: string; track: string; param: AutoParam; pts: AutoPoint[] }
+
+export interface ScCfg { thr: number; ratio: number; atk: number; rel: number; hpf: number; mix: number; knee: number }
+
+export interface ComposeParams {
+  style: string;
+  form: string;       // 'auto' or form id
+  bpm: number;
+  key: number;        // 0..11
+  scale: ScaleId;
+  bars: number;       // target length
+  seed: number;
+  density: number;    // 0..1
+  complexity: number; // 0..1
+  swing: number;      // 0.5..0.68
+  acid: number;
+  poly: number;
+  dirt: number;
+  depth: number;
+  mode: ProdMode;
+}
+
+export interface Project {
+  v: 1;
+  revision: number;
+  name: string;
+  params: ComposeParams;
+  formId: string;
+  sections: Section[];
+  tracks: Track[];
+  auto: AutoLane[];
+  sc: Record<ScGroup, ScCfg>;
+  scOn: boolean;
+  overrides: Record<string, number>; // `${sectionId}:${layerId}` -> forced level
+  secSeed: Record<string, number>;   // per-section variation seeds
+  loop: { on: boolean; a: number; b: number };
+}
+
+export type Selection =
+  | { kind: 'none' }
+  | { kind: 'section'; id: string }
+  | { kind: 'track'; id: string }
+  | { kind: 'clip'; id: string; track: string }
+  | { kind: 'device'; id: ScGroup | 'master' };
+
+export const STEPS_PER_BAR = 16;
+export const totalBars = (p: Project) => p.sections.reduce((m, s) => Math.max(m, s.start + s.bars), 0);
