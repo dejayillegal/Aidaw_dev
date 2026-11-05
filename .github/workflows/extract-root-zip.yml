@@ -1,0 +1,43 @@
+name: Extract root zip archive
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'refine-daw-architectural-plan.zip'
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Ensure zip exists
+        run: |
+          if [ ! -f "refine-daw-architectural-plan.zip" ]; then
+            echo "Archive not found: refine-daw-architectural-plan.zip"
+            exit 1
+          fi
+
+      - name: Extract archive to repo root
+        run: |
+          set -e
+          unzip -o "refine-daw-architectural-plan.zip" -d .
+
+      - name: Commit extracted files
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git add .
+            git commit -m "Extract refine-daw-architectural-plan archive"
+            git push
+          else
+            echo "No extracted changes to commit."
+          fi
