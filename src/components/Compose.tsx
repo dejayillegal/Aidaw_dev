@@ -98,12 +98,12 @@ export function Compose() {
                 <tr key={t.id}>
                   <td className="sticky left-0 z-10 max-w-[104px] truncate bg-panel pr-1.5 text-[10px] text-slate-300" title={`${t.name} · ${LAYERS[t.layer].reg}`}><span className="mr-1 inline-block h-1.5 w-1.5 rounded-full" style={{ background: t.color }} />{t.name}</td>
                   {p.sections.map((s) => {
-                    const key = `${s.id}:${t.layer}`; const ov = p.overrides[key]; const lv = s.levels[t.layer] ?? 0;
+                    const key = `${s.id}:${t.id}`; const ov = p.overrides[key]; const lv = s.levels[t.id] ?? s.levels[t.layer] ?? 0;
                     const next = ov === undefined ? 0 : ov === 0 ? 0.4 : ov < 1 ? 1 : null;
                     return (
                       <td key={s.id} className="p-0">
                         <button aria-label={`${t.name} in ${s.name}: ${Math.round(lv * 100)}%`} title={`${t.name} · ${s.name}: ${Math.round(lv * 100)}%${ov !== undefined ? ' (manual)' : ''}`} disabled={s.lock || t.lock}
-                          onClick={() => setLayerLevel(s.id, t.layer, next)}
+                          onClick={() => setLayerLevel(s.id, t.id, next)}
                           className={cn('relative block h-[14px] w-[18px] rounded-[2px] border', ov !== undefined ? 'border-white/70' : 'border-transparent', (s.lock || t.lock) && 'opacity-40')}
                           style={{ background: lv < 0.02 ? '#161b21' : t.color, opacity: lv < 0.02 ? 1 : 0.25 + lv * 0.75 }} />
                       </td>

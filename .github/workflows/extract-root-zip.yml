@@ -1,43 +1,28 @@
-name: Extract root zip archive
-
+name: Inspect archived source (manual)
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - 'refine-daw-architectural-plan.zip'
-
+permissions:
+  contents: read
 jobs:
-  extract:
+  inspect:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Ensure zip exists
+      - uses: actions/checkout@v4
+      - name: Compare archived source without overwriting the checkout
+        shell: python
         run: |
-          if [ ! -f "refine-daw-architectural-plan.zip" ]; then
-            echo "Archive not found: refine-daw-architectural-plan.zip"
-            exit 1
-          fi
-
-      - name: Extract archive to repo root
-        run: |
-          set -e
-          unzip -o "refine-daw-architectural-plan.zip" -d .
-
-      - name: Commit extracted files
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if [ -n "$(git status --porcelain)" ]; then
-            git add .
-            git commit -m "Extract refine-daw-architectural-plan archive"
-            git push
-          else
-            echo "No extracted changes to commit."
-          fi
+          from pathlib import Path, PurePosixPath
+          import zipfile
+          with zipfile.ZipFile('refine-daw-architectural-plan.zip') as archive:
+              entries = archive.infolist()
+              if len(entries) > 5000 or sum(x.file_size for x in entries) > 64 * 1024 * 1024:
+                  raise ValueError('Archive exceeds inspection limits')
+              for entry in entries:
+                  path = PurePosixPath(entry.filename)
+                  if path.is_absolute() or '..' in path.parts or '\\' in entry.filename:
+                      raise ValueError('Unsafe archive path')
+                  if entry.is_dir():
+                      continue
+                  target = Path(entry.filename)
+                  same = target.is_file() and target.read_bytes() == archive.read(entry)
+                  print(repr(entry.filename), 'matches' if same else 'differs')

@@ -15,11 +15,16 @@ class SidechainComp extends AudioWorkletProcessor {
       { name: 'knee', defaultValue: 6, minValue: 0, maxValue: 30, automationRate: k }
     ];
   }
-  constructor() {
+  constructor(options) {
     super();
+    this.metering = options?.processorOptions?.metering !== false;
+    this.active = true;
+    this.port.onmessage = e => { if (e.data === 'dispose') this.active = false; };
+    this.hxChannels = new Float64Array(32); this.hyChannels = new Float64Array(32);
     this.env = 0; this.gr = 0; this.hx = 0; this.hy = 0; this.q = 0; this.maxGr = 0; this.maxKey = -120;
   }
   process(inputs, outputs, p) {
+    if (!this.active) return false;
     const inp = inputs[0], key = inputs[1], out = outputs[0];
     const N = out[0].length, sr = sampleRate;
     const thr = p.thr[0], ratio = p.ratio[0], atk = p.atk[0], rel = p.rel[0], hpf = p.hpf[0], mix = p.mix[0], knee = Math.max(0.01, p.knee[0]);
@@ -28,11 +33,13 @@ class SidechainComp extends AudioWorkletProcessor {
     const rc = 1 / (2 * Math.PI * hpf), alpha = rc / (rc + 1 / sr);
     const nk = key ? key.length : 0, ni = inp ? inp.length : 0;
     for (let i = 0; i < N; i++) {
-      let k = 0;
-      for (let c = 0; c < nk; c++) k += key[c][i];
-      if (nk > 1) k /= nk;
-      const hy = alpha * (this.hy + k - this.hx); this.hx = k; this.hy = hy;
-      const lv = Math.abs(hy);
+      let lv = 0;
+      for (let c = 0; c < nk && c < 32; c++) {
+        const x = key[c][i];
+        const y = alpha * (this.hyChannels[c] + x - this.hxChannels[c]);
+        this.hxChannels[c] = x; this.hyChannels[c] = y;
+        lv = Math.max(lv, Math.abs(y));
+      }
       this.env = lv > this.env ? lv : this.env * detRel;
       const db = 20 * Math.log10(this.env + 1e-9);
       const over = db - thr; let red = 0;
@@ -47,12 +54,13 @@ class SidechainComp extends AudioWorkletProcessor {
         const s = ni ? inp[ch % ni][i] : 0;
         out[ch][i] = s * gm;
       }
-      if (this.gr > this.maxGr) this.maxGr = this.gr;
+      const effectiveGr = -20 * Math.log10(Math.max(1e-9, gm));
+      if (effectiveGr > this.maxGr) this.maxGr = effectiveGr;
       if (db > this.maxKey) this.maxKey = db;
     }
-    if (++this.q >= 6) {
+    if (this.metering && ++this.q >= 6) {
       this.port.postMessage({ gr: this.maxGr, key: this.maxKey });
-      this.q = 0; this.maxGr = this.gr; this.maxKey = -120;
+      this.q = 0; this.maxGr = 0; this.maxKey = -120;
     }
     return true;
   }

@@ -4,7 +4,7 @@ AIDAW is a browser-based, AI-assisted techno digital audio workstation built wit
 
 ## Project status
 
-This repository is the source for the web application. The current package scripts expose Vite development, build, and preview commands. Build and runtime status have not been independently verified for the current repository revision; inspect and type-check the source before treating a build as release-ready.
+This repository is the source for the web application. The current package scripts expose Vite development, build, and preview commands. The recovery branch restores the previously damaged core modules and adds command/snapshot validation, regression tests, variable style inventories and audio/export safety fixes. Strict type checking, automated domain tests and the production build have been run; browser playback, complete WAV rendering and Android operation remain unqualified. See [implementation status](docs/IMPLEMENTATION_STATUS.md) for exact evidence and remaining gates.
 
 There is no checked-in Capacitor Android project or debug APK at this time. Android packaging is a planned integration and must not be described as complete until the Android project builds and is tested on target devices.
 
@@ -27,7 +27,11 @@ npm run build
 npm run preview
 ```
 
-`npm run build` runs `vite build`. No test or type-check script is currently defined in `package.json`; do not assume tests have run just because a build completes.
+`npm run build` runs `vite build`. Run the complete software checks with `npm run check` (strict TypeScript, Vitest, production build), or use `npm test` and `npm run typecheck` individually. These checks do not replace real browser/audio/device qualification.
+
+## Projects and recovery
+
+The Project menu can download a validated `.aidaw.json` backup and open a saved project after confirmation. Autosave keeps checksummed current/previous snapshots and preserves original legacy data. Save errors are displayed; keep explicit backups of important work. This is not yet a full IndexedDB command journal.
 
 ## Android packaging (planned)
 

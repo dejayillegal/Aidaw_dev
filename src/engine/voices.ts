@@ -1,8 +1,8 @@
 import type { Note, SynthKind } from './types';
-import { midiHz } from './theory';
+import { midiHz, Rng } from './theory';
 
 export interface TrackCtl { cutoff: AudioNode; res: AudioNode }
-export interface VEnv { ctx: BaseAudioContext; noise: AudioBuffer; dirt: number; stepDur: number; onStart(): void; onEnd(): void }
+export interface VEnv { ctx: BaseAudioContext; noise: AudioBuffer; dirt: number; stepDur: number; random: () => number; sources: Set<AudioScheduledSourceNode>; onStart(): void; onEnd(): void }
 
 const curves = new Map<number, Float32Array<ArrayBuffer>>();
 function curve(k: number): Float32Array<ArrayBuffer> {
@@ -15,17 +15,18 @@ function curve(k: number): Float32Array<ArrayBuffer> {
   }
   return c;
 }
-export const makeNoise = (ctx: BaseAudioContext) => {
+export const makeNoise = (ctx: BaseAudioContext, seed = 1) => {
+  const rng=new Rng(seed);
   const b = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate); const d = b.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  for (let i = 0; i < d.length; i++) d[i] = rng.next() * 2 - 1;
   return b;
 };
 
 type Src = AudioScheduledSourceNode;
 function done(env: VEnv, srcs: Src[], endT: number, tail: AudioNode, cleanup: (() => void)[] = []) {
-  srcs.forEach((s) => s.stop(endT));
+  srcs.forEach((s) => {env.sources.add(s);s.stop(endT);});
   env.onStart();
-  srcs[0].onended = () => { tail.disconnect(); cleanup.forEach((f) => f()); env.onEnd(); };
+  srcs[0].onended = () => { srcs.forEach(s=>{env.sources.delete(s);s.disconnect();});tail.disconnect(); cleanup.forEach((f) => {try{f();}catch{/* Graph already disposed. */}}); env.onEnd(); };
 }
 function bindCutoff(ctl: TrackCtl, f: BiquadFilterNode, cl: (() => void)[], res = false) {
   ctl.cutoff.connect(f.detune); cl.push(() => ctl.cutoff.disconnect(f.detune));
@@ -47,7 +48,7 @@ function osc(ctx: BaseAudioContext, type: OscillatorType, hz: number, t: number,
   const o = ctx.createOscillator(); o.type = type; o.frequency.setValueAtTime(hz, t); o.detune.value = detune; o.start(t); return o;
 }
 function noiseSrc(env: VEnv, t: number, loop = false) {
-  const n = env.ctx.createBufferSource(); n.buffer = env.noise; n.loop = loop; n.start(t, Math.random() * 1.5); return n;
+  const n = env.ctx.createBufferSource(); n.buffer = env.noise; n.loop = loop; n.start(t, env.random() * 1.5); return n;
 }
 function filt(ctx: BaseAudioContext, type: BiquadFilterType, f: number, q = 0.7) { const b = ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; b.Q.value = q; return b; }
 const gain = (ctx: BaseAudioContext, v = 1) => { const g = ctx.createGain(); g.gain.value = v; return g; };
@@ -56,7 +57,8 @@ const gz = (ctx: BaseAudioContext, t: number) => { const g = ctx.createGain(); g
 function shaper(ctx: BaseAudioContext, k: number) { const s = ctx.createWaveShaper(); s.curve = curve(k); s.oversample = '2x'; return s; }
 
 export function playVoice(kind: SynthKind, env: VEnv, dest: AudioNode, t: number, durSec: number, n: Note, ctl: TrackCtl, slideFrom?: number): number | undefined {
-  const ctx = env.ctx; const v = Math.max(0.05, n.v); const hz = midiHz(n.p); const cl: (() => void)[] = [];
+  if(n.v<=0)return undefined;
+  const ctx = env.ctx; const v = Math.max(0, n.v); const hz = midiHz(n.p); const cl: (() => void)[] = [];
   const out = gain(ctx); out.connect(dest);
   switch (kind) {
     case 'kick': {

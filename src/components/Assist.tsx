@@ -34,7 +34,7 @@ export function Assist() {
             {report.issues.map((i) => (
               <div key={i.id} className="flex items-start gap-1.5 rounded border border-line bg-bg px-1.5 py-1 text-[10px] leading-snug">
                 <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: SEV[i.sev] }} /><span className="flex-1 text-slate-300">{i.text}</span>
-                {i.fix && <Btn small tone="cyan" onClick={() => store.addProposal(fixFor(app.project, i.fix!))}>Fix</Btn>}
+                {i.fix && <Btn small tone="cyan" onClick={() => store.propose(() => fixFor(app.project, i.fix!))}>Fix</Btn>}
               </div>
             ))}
           </div>

@@ -1,5 +1,5 @@
 import type { AutoLane, Clip, Note, Project, ScCfg, ScGroup, Section, Track } from './types';
-import { mkId } from './composer';
+import { assertProject, assertLocks } from './validation';
 
 export type Source = 'user' | 'ai' | 'composer';
 
@@ -14,8 +14,8 @@ export type Command =
   | { type: 'SET_CLIP'; id: string; patch: Partial<Omit<Clip, 'id'>> }
   | { type: 'ADD_CLIP'; track: string; clip: Clip }
   | { type: 'DEL_CLIP'; id: string }
-  | { type: 'SPLIT_CLIP'; id: string; at: number }
-  | { type: 'DUP_CLIP'; id: string }
+  | { type: 'SPLIT_CLIP'; id: string; at: number; rightId: string }
+  | { type: 'DUP_CLIP'; id: string; copyId: string }
   | { type: 'SET_NOTES'; clip: string; notes: Note[] }
   | { type: 'SET_SC'; group: ScGroup; patch: Partial<ScCfg> }
   | { type: 'SET_SC_ON'; on: boolean }
@@ -40,9 +40,9 @@ const mapClips = (p: Project, f: (c: Clip, t: Track) => Clip | Clip[] | null): P
   }),
 });
 
-export function applyCommand(p: Project, c: Command): Project {
+function reduceCommand(p: Project, c: Command): Project {
   switch (c.type) {
-    case 'BATCH': return c.cmds.reduce(applyCommand, p);
+    case 'BATCH': return c.cmds.reduce(reduceChecked, p);
     case 'SET_PARAMS': return { ...p, params: { ...p.params, ...c.patch } };
     case 'SET_NAME': return { ...p, name: c.name };
     case 'SET_TRACK': return { ...p, tracks: p.tracks.map((t) => (t.id === c.id ? { ...t, ...c.patch } : t)) };
@@ -59,11 +59,11 @@ export function applyCommand(p: Project, c: Command): Project {
     case 'SPLIT_CLIP':
       return mapClips(p, (cl) => {
         if (cl.id !== c.id || c.at <= cl.start + 1e-6 || c.at >= cl.start + cl.len - 1e-6) return cl;
-        const right: Clip = { ...cl, id: mkId('c'), start: c.at, len: cl.start + cl.len - c.at, off: (((cl.off + (c.at - cl.start) * 16) % cl.loop) + cl.loop) % cl.loop };
+        const right: Clip = { ...cl, id: c.rightId, start: c.at, len: cl.start + cl.len - c.at, off: (((cl.off + (c.at - cl.start) * 16) % cl.loop) + cl.loop) % cl.loop };
         return [{ ...cl, len: c.at - cl.start }, right];
       });
     case 'DUP_CLIP':
-      return mapClips(p, (cl) => (cl.id === c.id ? [cl, { ...cl, id: mkId('c'), start: cl.start + cl.len, label: cl.label }] : cl));
+      return mapClips(p, (cl) => (cl.id === c.id ? [cl, { ...cl, id: c.copyId, start: cl.start + cl.len, label: cl.label }] : cl));
     case 'SET_NOTES': return mapClips(p, (cl) => (cl.id === c.clip ? { ...cl, notes: c.notes } : cl));
     case 'SET_SC': return { ...p, sc: { ...p.sc, [c.group]: { ...p.sc[c.group], ...c.patch } } };
     case 'SET_SC_ON': return { ...p, scOn: c.on };
@@ -75,6 +75,39 @@ export function applyCommand(p: Project, c: Command): Project {
     case 'SET_LOOP': return { ...p, loop: c.loop };
     case 'PATCH': return { ...p, ...c.patch };
   }
+}
+
+function reduceChecked(p: Project, c: Command): Project {
+  if (!c || typeof c !== 'object') throw new Error('Invalid command');
+  const patchFields:Record<string,string[]>={
+    SET_PARAMS:Object.keys(p.params), SET_TRACK:['layer','name','color','group','synth','vol','pan','mute','solo','lock','sc','rev','del','cutoff','res'],
+    SET_SECTION:['role','name','start','bars','energy','lock','levels'], SET_CLIP:['start','len','loop','off','notes','gain','mute','label','transpose'],
+    SET_SC:['thr','ratio','atk','rel','hpf','mix','knee'], PATCH:['tracks','auto','sections','sc','scOn','secSeed','overrides','formId','params']
+  };
+  if('patch' in c){if(!c.patch||typeof c.patch!=='object'||Object.keys(c.patch).some(k=>!patchFields[c.type]?.includes(k)))throw new Error('Unsupported command patch field');}
+  if(c.type==='SET_SC'&&!['bass','harm','fx'].includes(c.group))throw new Error('Unknown sidechain bus');
+  if(c.type==='SPLIT_CLIP'&&!Number.isFinite(c.at))throw new Error('Invalid split time');
+  if(c.type==='BATCH'&&(!Array.isArray(c.cmds)||c.cmds.length>10000))throw new Error('Invalid command batch');
+  const tracks = p.tracks; const clips = tracks.flatMap(t=>t.clips);
+  if (['SET_TRACK','SET_SECTION','SET_CLIP','DEL_CLIP','SPLIT_CLIP','DUP_CLIP','DEL_AUTO'].includes(c.type)) {
+    const id = (c as {id:string}).id;
+    const pool = c.type==='SET_TRACK'?tracks:c.type==='SET_SECTION'?p.sections:c.type==='DEL_AUTO'?p.auto:clips;
+    if(!pool.some(x=>x.id===id))throw new Error(`Missing target: ${id}`);
+  }
+  if(c.type==='ADD_CLIP'&&!tracks.some(t=>t.id===c.track))throw new Error('Missing clip track');
+  if(c.type==='SET_NOTES'&&!clips.some(x=>x.id===c.clip))throw new Error('Missing notes clip');
+  const next=reduceCommand(p,c);
+  if(!next)throw new Error('Unsupported command');
+  assertProject(next);assertLocks(p,next);return next;
+}
+
+export function applyCommand(p:Project,c:Command):Project {
+  assertProject(p);
+  let commandCount=0;
+  const checkDepth=(cmd:Command,depth:number):void=>{if(++commandCount>10000)throw new Error('Command count exceeds limit');if(depth>32)throw new Error('Command nesting exceeds limit');if(cmd.type==='BATCH'){if(!Array.isArray(cmd.cmds)||cmd.cmds.length>10000)throw new Error('Invalid batch');cmd.cmds.forEach(x=>checkDepth(x,depth+1));}};
+  checkDepth(c,0);
+  const next=reduceChecked(p,structuredClone(c));
+  assertLocks(p,next);return next;
 }
 
 export interface HistoryEntry { id: number; label: string; source: Source; before: Project; after: Project; time: number; key?: string }
