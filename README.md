@@ -27,7 +27,7 @@ npm run build
 npm run preview
 ```
 
-`npm run build` runs `vite build`. Run the complete software checks with `npm run check` (strict TypeScript, Vitest, production build), or use `npm test` and `npm run typecheck` individually. These checks do not replace real browser/audio/device qualification.
+`npm run build` runs `vite build`. Run the complete software checks with `npm run check` (strict TypeScript, Vitest, production build), or use `npm test` and `npm run typecheck` individually. These checks do not replace real browser/audio/device qualification. Offline exports now propagate scheduling failures and support cooperative cancellation through PCM encoding/verification. A cancelled native render may need to drain before another export can start; completed exports are verified downloads, not confirmed disk writes.
 
 ## Projects and recovery
 

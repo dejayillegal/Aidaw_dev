@@ -4,7 +4,10 @@ import {clamp,hash} from './theory';
 const SUSTAINED=new Set(['sub','rumble','midbass','acid','stab','lead','arp','pad','dubchord','drone','noise']);
 export interface MusicalEvent {trackId:string;clipId:string;cycle:number;note:Note;startStep:number;durationSteps:number;chased:boolean;sourceStep:number}
 export const audibleTrack=(p:Project,t:Track)=>!t.mute&&(!p.tracks.some(t=>t.solo)||t.solo);
-export function needsSidechainKey(p:Project){return p.scOn&&p.tracks.some(t=>audibleTrack(p,t)&&(!!t.sc||t.rev>0));}
+export function needsSidechainKey(p:Project){
+ const automatedSends=new Set(p.auto.filter(l=>l.param==='rev'&&l.pts.some(point=>point.v>0)).map(l=>l.track));
+ return p.scOn&&p.tracks.some(t=>audibleTrack(p,t)&&(!!t.sc||t.rev>0||automatedSends.has(t.id)));
+}
 
 /** Pure event expansion shared by live/offline scheduling. Seek chase rearticulates held MIDI, not oscillator phase. */
 export function expandTrackEvents(track:Track,params:ComposeParams,a:number,b:number,chase=false):MusicalEvent[]{
