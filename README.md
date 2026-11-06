@@ -31,7 +31,7 @@ npm run preview
 
 ## Projects and recovery
 
-The Project menu can download a validated `.aidaw.json` backup and open a saved project after confirmation. Autosave keeps checksummed current/previous snapshots and preserves original legacy data. Save errors are displayed; keep explicit backups of important work. This is not yet a full IndexedDB command journal.
+The Project menu can download a validated `.aidaw.json` backup and open a saved project after confirmation. Autosave keeps checksummed current/previous snapshots and preserves original legacy data. Save errors are displayed; keep explicit backups of important work. IndexedDB commits each score and typed journal entry atomically, checks SHA-256 integrity, and rejects stale-window writes. The Project menu can review database recovery or explicitly keep divergent local edits. LocalStorage snapshots remain a fallback. The bounded journal supports recovery, but the full undo stack is not restored across sessions. Browser storage/crash behavior still needs qualification.
 
 ## Android packaging (planned)
 
