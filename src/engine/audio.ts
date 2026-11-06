@@ -360,17 +360,24 @@ export type ExportState = 'IDLE' | 'VALIDATING' | 'PREPARING' | 'RENDERING' | 'P
 export interface ExportResult { blob: Blob; peakDb: number; rmsDb: number; frames: number; seconds: number; sc: 'worklet' | 'fallback'; expectedFrames: number }
 export interface ExportOpts { sampleRate: number; bits: 16 | 24 | 32; onState: (s: ExportState, progress: number, msg?: string) => void; cancelled: () => boolean; allowDegradedSidechain?:boolean }
 
-export async function renderWav(p: Project, o: ExportOpts): Promise<ExportResult> {
+let exportActive=false;
+export async function renderWav(p: Project, options: ExportOpts): Promise<ExportResult> {
+  const o={...options};
+  if(exportActive){o.onState('FAILED',0);throw new Error('An export is already running or draining. Wait for it to finish; reload the app if the browser cannot resume it.');}
+  exportActive=true;let native:Promise<AudioBuffer>|undefined;
   try{
-    const result=await renderWavSnapshot(p,o);
+    const result=await renderWavSnapshot(p,o,rendering=>{native=rendering;});
     if(o.cancelled())throw new Error('CANCELLED');
     o.onState('COMPLETED',1);return result;
   }catch(error){
     o.onState(error instanceof Error&&error.message==='CANCELLED'?'CANCELLED':'FAILED',0);
     throw error;
+  }finally{
+    // Failed/cancelled native renders may still retain a large PCM allocation.
+    const release=()=>{exportActive=false;};if(native)void native.then(release,release);else release();
   }
 }
-async function renderWavSnapshot(source:Project,o:ExportOpts):Promise<ExportResult>{
+async function renderWavSnapshot(source:Project,o:ExportOpts,nativeStarted:(rendering:Promise<AudioBuffer>)=>void):Promise<ExportResult>{
   o.onState('VALIDATING', 0);
   assertProject(source);const p=structuredClone(source);
   if(o.cancelled())throw new Error('CANCELLED');
@@ -395,7 +402,7 @@ async function renderWavSnapshot(source:Project,o:ExportOpts):Promise<ExportResu
     buf=await renderOfflineWindows(ctx,total,sd,(a,b)=>{
       if(graph.failure)throw new Error(graph.failure);
       sched.scheduleWindow(p,a,b,s=>s*sd,false,total);
-    },o.cancelled,progress=>o.onState('RENDERING',progress),()=>graph.kill());
+    },o.cancelled,progress=>o.onState('RENDERING',progress),()=>graph.kill(),nativeStarted);
     if(graph.failure)throw new Error(graph.failure);
   }finally{graph.kill();}
   if(o.cancelled())throw new Error('CANCELLED');

@@ -18,3 +18,8 @@ it('retains the kick key when a sidechain destination is soloed',()=>{
  const p=newProject(defaultParams());const bass=p.tracks.find(t=>t.sc==='bass')!;bass.solo=true;expect(needsSidechainKey(p)).toBe(true);
  p.scOn=false;expect(needsSidechainKey(p)).toBe(false);
 });
+it('retains keys for soloed automated return sends and releases them when muted',()=>{
+ const p=newProject(defaultParams());p.tracks.forEach(t=>{t.sc=null;t.rev=0;});const target=p.tracks.find(t=>t.synth!=='kick')!;target.solo=true;
+ p.auto=[{id:'automated-return',track:target.id,param:'rev',pts:[{bar:0,v:0},{bar:8,v:1}]}];
+ expect(needsSidechainKey(p)).toBe(true);target.mute=true;expect(needsSidechainKey(p)).toBe(false);
+});

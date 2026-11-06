@@ -4,11 +4,11 @@ import {newProject,defaultParams} from '../src/engine/composer';
 import {TestNode,TestOfflineContext} from './helpers/offlineHost';
 const project=()=>{const p=newProject({...defaultParams(),bars:12});p.auto=[];return p;};
 beforeEach(()=>{
- TestOfflineContext.instances=[];TestOfflineContext.rejectSuspend=false;TestOfflineContext.rejectResume=false;TestOfflineContext.worklet=true;
+ TestOfflineContext.instances=[];TestOfflineContext.rejectSuspend=false;TestOfflineContext.rejectResume=false;TestOfflineContext.rejectNextResume=false;TestOfflineContext.completionGate=undefined;TestOfflineContext.worklet=true;
  vi.stubGlobal('window',{OfflineAudioContext:TestOfflineContext});vi.stubGlobal('OfflineAudioContext',TestOfflineContext);vi.stubGlobal('AudioWorkletNode',TestNode);
  vi.spyOn(Scheduler.prototype,'scheduleWindow').mockImplementation(()=>{});
 });
-afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();});
+afterEach(async()=>{TestOfflineContext.rejectResume=false;for(const ctx of TestOfflineContext.instances)if(ctx.state==='suspended')await ctx.resume();await new Promise(resolve=>setTimeout(resolve,0));vi.restoreAllMocks();vi.unstubAllGlobals();});
 const options=(onState:(state:ExportState,progress:number)=>void=()=>{})=>({sampleRate:44100,bits:16 as const,cancelled:()=>false,onState});
 it('fails export if a later scheduling window throws, and disposes the graph',async()=>{
  const schedule=vi.mocked(Scheduler.prototype.scheduleWindow);schedule.mockImplementation((_p,a)=>{if(a>=128)throw new Error('Voice scheduling failed');});
@@ -60,4 +60,22 @@ it('keeps rendering the captured score when the caller edits its original object
 it('fails a processor error instead of exporting a partially silent bus',async()=>{
  const sync=Graph.prototype.sync;vi.spyOn(Graph.prototype,'sync').mockImplementation(function(p){sync.call(this,p);this.failure='Sidechain processor failed';});
  await expect(renderWav(project(),options())).rejects.toThrow('Sidechain processor failed');
+});
+it('drains a previously registered future suspension after a transient resume failure',async()=>{
+ TestOfflineContext.rejectNextResume=true;
+ await expect(renderWav(newProject({...defaultParams(),bars:16}),options())).rejects.toThrow('Resume failed');
+ await new Promise(resolve=>setTimeout(resolve,0));expect(TestOfflineContext.instances[0].state).toBe('closed');
+});
+it('prevents overlapping native buffers while a cancelled render is still draining',async()=>{
+ let finish!:()=>void;TestOfflineContext.completionGate=new Promise(resolve=>{finish=resolve;});let cancelled=false;
+ await expect(renderWav(project(),{...options((s,f)=>{if(s==='RENDERING'&&f>0)cancelled=true;}),cancelled:()=>cancelled})).rejects.toThrow('CANCELLED');
+ const second=renderWav(project(),options());let timer:ReturnType<typeof setTimeout>|undefined;
+ try{
+  await expect(Promise.race([second,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Overlapping render admitted')),30);})])).rejects.toThrow(/already running|draining/i);
+  expect(TestOfflineContext.instances).toHaveLength(1);
+ }finally{clearTimeout(timer);finish();await second.catch(()=>{});await new Promise(resolve=>setTimeout(resolve,0));}
+});
+it('requires real sidechain for an automated reverb send with a zero static send',async()=>{
+ TestOfflineContext.worklet=false;const p=project();p.tracks.forEach(t=>{t.sc=null;t.rev=0;});p.auto=[{id:'send-rise',track:p.tracks[0].id,param:'rev',pts:[{bar:0,v:0},{bar:4,v:0.8}]}];
+ await expect(renderWav(p,options())).rejects.toThrow(/sidechain.*unavailable/i);
 });
