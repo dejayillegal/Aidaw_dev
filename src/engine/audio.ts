@@ -1,9 +1,10 @@
-import type { AutoLane, Clip, Project, ScGroup, SynthKind, Track } from './types';
+import type { AutoLane, Project, ScGroup, SynthKind, Track } from './types';
 import { STEPS_PER_BAR, totalBars } from './types';
 import { clamp, lerp, Rng, hash } from './theory';
 import { makeNoise, playVoice, type TrackCtl, type VEnv } from './voices';
 import { inspectWav } from './wavVerification';
 import { assertProject } from './validation';
+import {expandTrackEvents,needsSidechainKey} from './musicalEvents';
 import { SC_WORKLET_SRC } from './worklet';
 
 const GROUPS: ScGroup[] = ['bass', 'harm', 'fx'];
@@ -14,7 +15,7 @@ const hpHz = (v: number) => 20 * Math.pow(2, v * 6.5);
 export interface Strip {
   id: string; input: GainNode; volA: GainNode; fader: GainNode; pan: StereoPannerNode; out: GainNode; analyser: AnalyserNode;
   revSend: GainNode; delSend: GainNode; cutoff: ConstantSourceNode; res: ConstantSourceNode; ctl: TrackCtl;
-  target: AudioNode; sc: ScGroup | null; synth: SynthKind; last?: { hz: number; end: number };
+  keyConnected: boolean; target: AudioNode; sc: ScGroup | null; synth: SynthKind; last?: { hz: number; end: number };
 }
 
 function makeIR(ctx: BaseAudioContext, seconds = 2.8, seed = 2): AudioBuffer {
@@ -92,8 +93,7 @@ export class Graph {
     input.connect(volA); volA.connect(fader); fader.connect(pan); pan.connect(out); out.connect(analyser);
     out.connect(revSend); revSend.connect(this.revIn); out.connect(delSend); delSend.connect(this.delIn);
     out.connect(this.preMaster);
-    const s: Strip = { id: t.id, input, volA, fader, pan, out, analyser, revSend, delSend, cutoff, res, ctl: { cutoff, res }, target: this.preMaster, sc: null, synth: t.synth };
-    if (t.synth === 'kick' && this.useWorklet) for (const g of GROUPS) out.connect(this.groups[g].node!, 0, 1);
+    const s: Strip = { id: t.id, input, volA, fader, pan, out, analyser, revSend, delSend, cutoff, res, ctl: { cutoff, res }, keyConnected: false, target: this.preMaster, sc: null, synth: t.synth };
     this.strips.set(t.id, s);
     return s;
   }
@@ -111,7 +111,13 @@ export class Graph {
       live.add(t.id);
       const s = this.strips.get(t.id) ?? this.createStrip(t);
       const audible = !t.mute && (!anySolo || t.solo);
-      s.fader.gain.setTargetAtTime(audible ? t.vol : 0, now, 0.015);
+      s.fader.gain.setTargetAtTime(t.mute ? 0 : t.vol, now, 0.015);
+      s.out.gain.setTargetAtTime(audible ? 1 : 0,now,0.015);
+      const keyConnected=t.synth==='kick'&&this.useWorklet;
+      if(keyConnected!==s.keyConnected){
+        for(const group of GROUPS){const node=this.groups[group].node!;if(keyConnected)s.pan.connect(node,0,1);else s.pan.disconnect(node,0,1);}
+        s.keyConnected=keyConnected;
+      }
       s.pan.pan.setTargetAtTime(t.pan, now, 0.015);
       if (!laneOf(t.id, 'rev')) s.revSend.gain.setTargetAtTime(t.rev * 0.8, now, 0.02);
       s.delSend.gain.setTargetAtTime(t.del * 0.7, now, 0.02);
@@ -205,60 +211,45 @@ export class Scheduler {
     }
   }
 
-  scheduleWindow(p: Project, a: number, b: number, mapT: (step: number) => number) {
-    const sd = stepDurOf(p.params.bpm); const sw = p.params.swing; const anySolo = p.tracks.some((t) => t.solo);
-    const kickTimes: number[] = [];
-    for (const t of p.tracks) {
-      if (t.mute || (anySolo && !t.solo)) continue;
-      const s = this.g.strips.get(t.id); if (!s) continue;
-      for (const c of t.clips) {
-        if (c.mute || !c.notes.length) continue;
-        const cs = c.start * STEPS_PER_BAR, ce = (c.start + c.len) * STEPS_PER_BAR;
-        if (b <= cs || a >= ce) continue;
-        this.clipNotes(t, s, c, cs, ce, a, b, sd, sw, mapT, kickTimes);
+  scheduleWindow(p: Project, a: number, b: number, mapT: (step: number) => number, chase=false, endStep=Infinity) {
+    const sd=stepDurOf(p.params.bpm),anySolo=p.tracks.some(t=>t.solo),keyNeeded=needsSidechainKey(p);
+    const kickTimes:number[]=[];
+    for(const track of p.tracks){
+      if(track.mute||(anySolo&&!track.solo&&!(track.synth==='kick'&&keyNeeded)))continue;
+      const strip=this.g.strips.get(track.id);if(!strip)continue;
+      for(const event of expandTrackEvents(track,p.params,a,Math.min(b,endStep),chase)){
+        const time=mapT(event.startStep),duration=Math.max(0.001,Math.min(event.durationSteps,endStep-event.startStep)*sd);
+        let slideFrom:number|undefined;
+        if(track.synth==='acid'){
+          if(!event.chased&&event.note.slide&&strip.last&&time-strip.last.end<=sd*0.6&&time>=strip.last.end-0.2)slideFrom=strip.last.hz;
+          strip.last={hz:440*Math.pow(2,(event.note.p-69)/12),end:time+duration};
+        }
+        if(track.synth==='kick')kickTimes.push(time);
+        const noiseRandom=new Rng(hash(this.g.seed,track.id,event.clipId,event.cycle,event.note.t,event.note.p,'noise'));
+        this.g.env.random=()=>noiseRandom.next();
+        playVoice(track.synth,this.g.env,strip.input,time,duration,event.note,strip.ctl,slideFrom);
       }
     }
-    if (!this.g.useWorklet && p.scOn) {
-      kickTimes.sort((x, y) => x - y);
-      for (const g of GROUPS) {
-        const d = this.g.groups[g].duck; if (!d) continue; const cfg = p.sc[g];
-        const depth = Math.min(0.92, (1 - 1 / cfg.ratio) * 1.05) * cfg.mix;
-        for (const tm of kickTimes) { d.gain.setValueAtTime(1 - depth, tm); d.gain.setTargetAtTime(1, tm + 0.004, cfg.rel / 1000 / 3); }
+    if(!this.g.useWorklet&&p.scOn){
+      kickTimes.sort((a,b)=>a-b);
+      for(const group of GROUPS){
+        const duck=this.g.groups[group].duck;if(!duck)continue;const cfg=p.sc[group];
+        const depth=Math.min(0.92,(1-1/cfg.ratio)*1.05)*cfg.mix;
+        for(const time of kickTimes){duck.gain.setValueAtTime(1-depth,time);duck.gain.setTargetAtTime(1,time+0.004,cfg.rel/1000/3);}
       }
     }
   }
 
-  private clipNotes(t: Track, s: Strip, c: Clip, cs: number, ce: number, a: number, b: number, sd: number, sw: number, mapT: (x: number) => number, kicks: number[]) {
-    const lo = Math.max(a, cs) - cs + c.off, hi = Math.min(b, ce) - cs + c.off;
-    const r0 = Math.floor(lo / c.loop), r1 = Math.floor(hi / c.loop);
-    const swingShift = (2 * sw - 1) * sd;
-    for (let r = r0; r <= r1; r++) {
-      for (const n of c.notes) {
-        if (n.t >= c.loop) continue;
-        const abs = cs + r * c.loop + n.t - c.off;
-        if (abs < a - 1e-9 || abs >= b - 1e-9 || abs < cs - 1e-9 || abs >= ce - 1e-9) continue;
-        if (n.prob !== undefined && n.prob < 1 && hash(this.g.seed,t.id,c.id,r,n.t,n.p)/4294967296 > n.prob) continue;
-        const odd = Math.abs((abs % 2) - 1) < 0.02;
-        const shifted=Math.max(cs,Math.min(ce-1e-9,abs+(odd?swingShift/sd:0)+(n.micro??0)));
-        const tm = mapT(shifted);
-        const dur = Math.max(0.02, n.d * sd * 0.98);
-        const note = { ...n, p: n.p + c.transpose, v: clamp(n.v * c.gain, 0, 1.2) };
-        if(note.v<=0)continue;
-        let slideFrom: number | undefined;
-        if (t.synth === 'acid') {
-          if (n.slide && s.last && tm - s.last.end <= sd * 0.6 && tm >= s.last.end - 0.2) slideFrom = s.last.hz;
-          s.last = { hz: 440 * Math.pow(2, (note.p - 69) / 12), end: tm + dur };
-        }
-        if (t.synth === 'kick') kicks.push(tm);
-        const noiseRandom=new Rng(hash(this.g.seed,t.id,c.id,r,n.t,n.p,'noise'));
-        this.g.env.random=()=>noiseRandom.next();
-        playVoice(t.synth, this.g.env, s.input, tm, dur, note, s.ctl, slideFrom);
-      }
-    }
-  }
 }
 
 // ───────────── realtime engine ─────────────
+export function playbackRange(p:Project,fromBar:number){
+  if(!Number.isFinite(fromBar))throw new Error('Invalid playback position');
+  const end=totalBars(p),loopStart=Math.min(end,p.loop.a),loopEnd=Math.min(end,p.loop.b);
+  const loop=p.loop.on&&loopEnd>loopStart;
+  const start=loop&&(fromBar<loopStart||fromBar>=loopEnd)?loopStart:Math.max(0,Math.min(end,fromBar));
+  return {start,end,loopStart,loopEnd:loop?loopEnd:Infinity};
+}
 export class Engine {
   ctx?: AudioContext; graph: Graph | null = null; sched?: Scheduler; workletOk = false; workletTried = false;
   playing = false; timer?: number; getProject: () => Project = () => { throw new Error('no project'); };
@@ -266,6 +257,7 @@ export class Engine {
   private nextStep = 0; private lastProject?: Project; private lastAuto?: unknown;
   private shared?: { noise: AudioBuffer; ir: AudioBuffer };
   private generation=0;
+  private chaseNextWindow=false;
   private initializing?: Promise<void>;
   schedMs = 0; onStop?: () => void; onError?: (error:Error)=>void;
 
@@ -291,6 +283,7 @@ export class Engine {
 
   /** call from a user gesture (also unlocks iOS/Android autoplay policies) */
   async play(fromBar: number) {
+    if(!Number.isFinite(fromBar))throw new Error('Invalid playback position');
     const generation=++this.generation;
     this.halt();
     if(!this.initializing)this.initializing=this.initialize().finally(()=>{this.initializing=undefined;});
@@ -300,10 +293,13 @@ export class Engine {
     this.shared={noise:makeNoise(ctx,p.params.seed),ir:makeIR(ctx,2.8,p.params.seed+1)};
     this.graph=new Graph(ctx,this.workletOk,this.shared,true,p.params.seed);this.sched=new Scheduler(this.graph);
     this.graph!.sync(p); this.lastProject = p; this.lastAuto = p.auto;
-    const dur = stepDurOf(p.params.bpm); const t0 = ctx.currentTime + 0.1; const step = fromBar * STEPS_PER_BAR;
-    this.segs = [{ refStep: step, refTime: t0, dur }]; this.nextStep = step; this.playing = true;
-    this.sched!.scheduleAutomation(p, fromBar, t0, true);
-    this.timer = window.setInterval(() => {try{this.tick();}catch(error){this.stop();this.onError?.(error instanceof Error?error:new Error(String(error)));}}, 25); this.tick();
+    const range=playbackRange(p,fromBar);
+    const dur = stepDurOf(p.params.bpm); const t0 = ctx.currentTime + 0.1; const step = range.start * STEPS_PER_BAR;
+    this.segs = [{ refStep: step, refTime: t0, dur }]; this.nextStep = step; this.chaseNextWindow=true; this.playing = true;
+    try{
+      this.sched!.scheduleAutomation(p, range.start, t0, true);
+      this.timer = window.setInterval(() => {try{this.tick();}catch(error){this.stop();this.onError?.(error instanceof Error?error:new Error(String(error)));}}, 25); this.tick();
+    }catch(error){this.stop();throw error;}
   }
 
   private halt() {
@@ -341,15 +337,16 @@ export class Engine {
     }
     const seg = this.segs[this.segs.length - 1]; const end = totalBars(p) * STEPS_PER_BAR;
     const clockStep=seg.refStep+(ctx.currentTime-seg.refTime)/seg.dur;
-    if(this.nextStep<clockStep-0.5){this.nextStep=Math.max(0,clockStep);this.sched.scheduleAutomation(p,this.nextStep/16,ctx.currentTime,true);}
+    if(this.nextStep<clockStep-0.5){this.nextStep=Math.max(0,clockStep);this.chaseNextWindow=true;this.sched.scheduleAutomation(p,this.nextStep/16,ctx.currentTime,true);}
     const horizon = ctx.currentTime + 0.3; const limit = seg.refStep + (horizon - seg.refTime) / seg.dur;
-    const loopEnd = p.loop.on && p.loop.b > p.loop.a ? p.loop.b * STEPS_PER_BAR : Infinity;
+    const range=playbackRange(p,this.nextStep/STEPS_PER_BAR);
+    const loopEnd = range.loopEnd * STEPS_PER_BAR;
     const stop = Math.min(limit, loopEnd, end);
-    if (stop > this.nextStep) { this.sched.scheduleWindow(p, this.nextStep, stop, (s) => seg.refTime + (s - seg.refStep) * seg.dur); this.nextStep = stop; }
+    if (stop > this.nextStep) { this.sched.scheduleWindow(p, this.nextStep, stop, (s) => seg.refTime + (s - seg.refStep) * seg.dur,this.chaseNextWindow,Math.min(end,loopEnd)); this.chaseNextWindow=false; this.nextStep = stop; }
     if (loopEnd !== Infinity && this.nextStep >= loopEnd - 1e-9) {
-      const tw = seg.refTime + (loopEnd - seg.refStep) * seg.dur; const ls = p.loop.a * STEPS_PER_BAR;
-      this.segs.push({ refStep: ls, refTime: tw, dur: seg.dur }); this.nextStep = ls;
-      this.sched.scheduleAutomation(p, p.loop.a, tw, true);
+      const tw = Math.max(ctx.currentTime,seg.refTime + (loopEnd - seg.refStep) * seg.dur); const ls = range.loopStart * STEPS_PER_BAR;
+      this.segs.push({ refStep: ls, refTime: tw, dur: seg.dur }); this.nextStep = ls;this.chaseNextWindow=true;
+      this.sched.scheduleAutomation(p, range.loopStart, tw, true);
     } else if (this.nextStep >= end - 1e-9 && ctx.currentTime > seg.refTime + (end - seg.refStep) * seg.dur + 3.5) this.stop();
     this.schedMs = this.schedMs * 0.9 + (performance.now() - t0) * 0.1;
   }
