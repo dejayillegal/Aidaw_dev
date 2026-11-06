@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+*.log
+android/local.properties
+*.keystore
+*.jks
