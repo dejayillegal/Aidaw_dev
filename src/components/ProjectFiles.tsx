@@ -1,4 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
+import type {DurableLoad} from '../engine/durablePersistence';
 import type {Project} from '../engine/types';
 import {decodeSnapshot,encodeSnapshot} from '../engine/persistence';
 import {store,useApp} from '../store';
@@ -8,7 +9,7 @@ import {Btn} from '../ui';
 /** Explicit file ownership complements autosave; import never overwrites on file selection. */
 export function ProjectFiles({compact}:{compact:boolean}){
  const app=useApp();const input=useRef<HTMLInputElement>(null);const urls=useRef(new Set<string>());
- const [pending,setPending]=useState<Project|null>(null);
+ const [pending,setPending]=useState<{project:Project;recovery?:DurableLoad}|null>(null);
  useEffect(()=>()=>{for(const url of urls.current)URL.revokeObjectURL(url);},[]);
  const save=()=>{
   try{
@@ -25,6 +26,8 @@ export function ProjectFiles({compact}:{compact:boolean}){
     <Btn onClick={save}>Download project backup</Btn>
     <Btn onClick={()=>input.current?.click()}>Open project…</Btn>
     <Btn onClick={()=>store.flushSave()}>Save autosave now</Btn>
+    <Btn onClick={()=>{void store.getDurableRecovery().then(recovery=>{if(recovery)setPending({project:recovery.project,recovery});else store.reportError('No database recovery snapshot is available.');}).catch(error=>store.reportError(error));}}>Review database recovery…</Btn>
+    {app.databaseRecovery&&<Btn tone="amber" onClick={()=>{void store.keepCurrentRecovery();}}>Keep current local edits</Btn>}
     {compact&&<>
      <Btn disabled={app.cursor===0} onClick={()=>store.undo()}>Undo</Btn>
      <Btn disabled={app.cursor===app.entries.length} onClick={()=>store.redo()}>Redo</Btn>
@@ -34,12 +37,12 @@ export function ProjectFiles({compact}:{compact:boolean}){
   </details>
   <input ref={input} type="file" accept=".json,.aidaw.json,application/json" className="hidden" aria-label="Open AIDAW project" onChange={async event=>{
    const file=event.target.files?.[0];event.target.value='';if(!file)return;
-   try{if(file.size>32*1024*1024)throw new Error('Project exceeds 32 MiB import limit');setPending(decodeSnapshot(await file.text()));}catch(error){store.reportError(error);}
+   try{if(file.size>32*1024*1024)throw new Error('Project exceeds 32 MiB import limit');setPending({project:decodeSnapshot(await file.text())});}catch(error){store.reportError(error);}
   }}/>
   {pending&&<div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/70 p-4">
    <div role="dialog" aria-modal="true" aria-label="Open project confirmation" className="w-full max-w-md rounded border border-line bg-panel p-4">
-    <h2 className="mb-2 font-semibold">Open {pending.name}?</h2><p className="mb-3 text-slate-400">This replaces the active workspace and its undo history. Download a backup of your current work before opening.</p>
-    <div className="flex flex-wrap gap-2"><Btn onClick={save}>Back up current project</Btn><Btn onClick={()=>setPending(null)}>Cancel</Btn><Btn tone="amber" onClick={()=>{store.replaceProject(pending);setPending(null);}}>Open project</Btn></div>
+    <h2 className="mb-2 font-semibold">Open {pending.project.name}?</h2><p className="mb-3 text-slate-400">This replaces the active workspace and its undo history. Download a backup of your current work before opening.</p>
+    <div className="flex flex-wrap gap-2"><Btn onClick={save}>Back up current project</Btn><Btn onClick={()=>setPending(null)}>Cancel</Btn><Btn tone="amber" onClick={()=>{if(pending.recovery)void store.restoreDurable(pending.recovery);else store.replaceProject(pending.project);setPending(null);}}>Open project</Btn></div>
    </div>
   </div>}
  </>;
