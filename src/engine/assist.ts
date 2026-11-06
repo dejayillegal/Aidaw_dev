@@ -8,6 +8,7 @@ import { diagnose, type FixId } from './diagnostics';
 
 export type DiffKind = 'added' | 'changed';
 export interface Proposal {
+  baseRevision: number; projectId: string;
   id: string; title: string; rationale: string; cmd: Command; preview: Project;
   diff: Record<string, DiffKind>; removed: { track: string; start: number; len: number }[];
   stats: { added: number; removed: number; changed: number; lanes: number; mixer: number };
@@ -16,9 +17,7 @@ export type AssistResult = { proposal: Proposal } | { message: string };
 
 const clone = <T,>(x: T): T => structuredClone(x);
 
-function clipSig(c: { start: number; len: number; loop: number; off: number; mute: boolean; gain: number; transpose: number; notes: { t: number; p: number; v: number; d: number; acc?: boolean }[] }) {
-  return `${c.start}|${c.len}|${c.loop}|${c.off}|${c.mute}|${c.gain}|${c.transpose}|` + c.notes.map((n) => `${n.t}:${n.p}:${n.v}:${n.d}:${n.acc ? 1 : 0}`).join(',');
-}
+const clipSig = (c: unknown) => JSON.stringify(c);
 
 export function buildProposal(base: Project, title: string, rationale: string, patch: Extract<Command, { type: 'PATCH' }>['patch']): Proposal {
   const cmd: Command = { type: 'PATCH', patch };
@@ -40,7 +39,7 @@ export function buildProposal(base: Project, title: string, rationale: string, p
     if (!o || JSON.stringify({ ...o, clips: [] }) !== JSON.stringify({ ...t, clips: [] })) mixer++;
   }
   if (JSON.stringify(base.sc) !== JSON.stringify(preview.sc) || base.scOn !== preview.scOn) mixer++;
-  return { id: uid('prop'), title, rationale, cmd, preview, diff, removed, stats: { added, removed: rem, changed, lanes, mixer } };
+  return { id: uid('prop'), baseRevision: base.revision, projectId: base.id, title, rationale, cmd, preview, diff, removed, stats: { added, removed: rem, changed, lanes, mixer } };
 }
 
 function keepLocked(base: Project, tracks: Track[]): Track[] {

@@ -1,15 +1,15 @@
+import {LAYERS,STYLES} from './engine/styles';
+import { uid } from './engine/theory';
 import { store, engine } from './store';
 import { interpret, buildProposal, type Proposal } from './engine/assist';
-import { regenSection, generate, mergeGenerated, mkClip } from './engine/composer';
+import { regenSection, generate, mergeGenerated, mkClip, layerLevel } from './engine/composer';
 import type { Command } from './engine/commands';
 import type { ComposeParams } from './engine/types';
 import { totalBars } from './engine/types';
 
 export function acceptProposal(id: string) {
   const pr = store.get().proposals.find((p) => p.id === id); if (!pr) return;
-  store.dispatch(pr.cmd, `AI · ${pr.title}`, 'ai');
-  store.dropProposal(id);
-  store.say('ai', `Applied “${pr.title}”. It is in the undo history, tagged AI.`);
+  if(store.acceptProposal(id))store.say('ai', `Applied “${pr.title}”. Undo restores the prior arrangement.`);
 }
 export function rejectProposal(id: string) { store.dropProposal(id); }
 export function offerProposal(pr: Proposal) { store.addProposal(pr); }
@@ -17,7 +17,8 @@ export function offerProposal(pr: Proposal) { store.addProposal(pr); }
 export function runAssist(text: string) {
   const s = store.get(); if (!text.trim()) return;
   store.say('user', text);
-  const r = interpret(text, s.project, s.selection, engine.playing ? Math.max(0, engine.getStep() / 16) : s.cursorBar);
+  let r;
+  try { r = interpret(text, s.project, s.selection, engine.playing ? Math.max(0, engine.getStep() / 16) : s.cursorBar); } catch(e){store.reportError(e);return;}
   if ('message' in r) { store.say('ai', r.message); return; }
   const st = r.proposal.stats;
   if (!st.added && !st.removed && !st.changed && !st.lanes && !st.mixer) { store.say('ai', `${r.proposal.title}: nothing to change — the project already satisfies this.`); return; }
@@ -40,8 +41,9 @@ export function composeGenerate(mode: 'new' | 'keep' | 'rig', patch?: Partial<Co
     return;
   }
   if (mode === 'new') {
-    const gen = generate(params, { overrides: {} });
-    const m = mergeGenerated(s.project, gen, false);
+    const protectedStructure=s.project.sections.some(s=>s.lock);
+    const gen = generate(params, { overrides: {}, ...(protectedStructure?{sections:s.project.sections}:{}) });
+    const m = mergeGenerated(s.project, gen, protectedStructure);
     store.dispatch({ type: 'PATCH', patch: { ...m, params, secSeed: {}, overrides: {} } }, `Compose · ${params.style} · seed ${params.seed}`, 'composer');
   } else {
     const gen = generate(params, { sections: s.project.sections, secSeed: s.project.secSeed, overrides: s.project.overrides });
@@ -57,7 +59,9 @@ export function setLayerLevel(secId: string, layer: string, level: number | null
   const base = { ...s.project, overrides: { ...s.project.overrides } };
   if (level === null) delete base.overrides[key]; else base.overrides[key] = level;
   const r = regenSection(base, secId, layer);
-  cmds.push({ type: 'PATCH', patch: { tracks: r.tracks, auto: r.auto, secSeed: s.project.secSeed } });
+  const target=s.project.tracks.find(t=>t.id===layer||t.layer===layer);
+  const sections=s.project.sections.map(sec=>sec.id!==secId?sec:{...sec,levels:{...sec.levels,[layer]:level??(target&&LAYERS[target.layer]?layerLevel(sec,LAYERS[target.layer],STYLES[s.project.params.style],s.project.params,base.overrides):0)}});
+  cmds.push({ type: 'PATCH', patch: { tracks: r.tracks, auto: r.auto, secSeed: r.secSeed, sections } });
   store.dispatch({ type: 'BATCH', cmds }, `Layer matrix · ${layer} @ ${s.project.sections.find((x) => x.id === secId)?.name}`, 'composer');
 }
 
@@ -76,7 +80,15 @@ export function newClipAt(trackId: string, bar: number) {
 export function splitSelectedAtPlayhead() {
   const s = store.get(); if (s.selection.kind !== 'clip') return;
   const bar = engine.playing ? engine.getStep() / 16 : s.cursorBar;
-  store.dispatch({ type: 'SPLIT_CLIP', id: s.selection.id, at: Math.round(bar * 4) / 4 }, 'Split clip');
+  store.dispatch({ type: 'SPLIT_CLIP', rightId: uid('clip'), id: s.selection.id, at: Math.round(bar * 4) / 4 }, 'Split clip');
 }
 
 export { buildProposal };
+
+export function toggleLoop(){
+ const {project,selection}=store.get();
+ if(project.loop.on){store.dispatch({type:'SET_LOOP',loop:{...project.loop,on:false}},'Loop off');return;}
+ const sec=selection.kind==='section'?project.sections.find(s=>s.id===selection.id):undefined;
+ if(!sec){store.reportError('Select a section flag before enabling loop');return;}
+ store.dispatch({type:'SET_LOOP',loop:{on:true,a:sec.start,b:sec.start+sec.bars}},'Loop section');
+}

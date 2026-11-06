@@ -1,5 +1,5 @@
 import type { AutoLane, AutoParam, Clip, ComposeParams, Note, Project, ScCfg, ScGroup, Section, SectionRole, Track } from './types';
-import { Rng, clamp, degree, euclid, hash } from './theory';
+import { Rng, clamp, degree, euclid, hash, uid } from './theory';
 import { ATOM_LAYERS, FORMS, GROUP_ORDER, LAYERS, ROLE_NAMES, ROLE_RULES, STYLES, type LayerDef, type StyleDef } from './styles';
 
 type PN = Note & { pri: number };
@@ -221,6 +221,14 @@ export function buildSections(P: ComposeParams, rng: Rng): { sections: Section[]
     const flex = idx.filter((i) => specs[i].flex); const pool = flex.length ? flex : idx;
     bars[rng.pick(pool)] += diff > 0 ? 8 : -8;
   }
+  let remaining = P.bars - total();
+  if (remaining > 0) bars[bars.length-2] += remaining;
+  else if (remaining < 0) {
+    for (let i=bars.length-1; i>=0 && remaining<0; i--) {
+      const amount=Math.min(-remaining,Math.max(0,bars[i]-1));bars[i]-=amount;remaining+=amount;
+    }
+    if(remaining<0)throw new Error('Duration too short for selected form');
+  }
   let start = 0;
   const sections: Section[] = specs.map((s, i) => {
     const sec: Section = {
@@ -383,7 +391,7 @@ function genAuto(tracks: Track[], sections: Section[], P: ComposeParams, levels:
 }
 
 // ───────────────────────── main generator ─────────────────────────
-export interface GenOpts { sections?: Section[]; secSeed?: Record<string, number>; overrides?: Record<string, number>; rig?: boolean }
+export interface GenOpts { layers?:string[]; sections?: Section[]; secSeed?: Record<string, number>; overrides?: Record<string, number>; rig?: boolean }
 export interface GenResult { sections: Section[]; tracks: Track[]; auto: AutoLane[]; formId: string }
 
 export function generate(P: ComposeParams, o: GenOpts = {}): GenResult {
@@ -396,7 +404,8 @@ export function generate(P: ComposeParams, o: GenOpts = {}): GenResult {
   else { const r = buildSections(P, rootRng); sections = r.sections; formId = r.formId; }
   const R = 24 + P.key;
 
-  const defs = style.layers.map((id, i) => ({ l: LAYERS[id], i })).sort((a, b) => GROUP_ORDER.indexOf(a.l.group) - GROUP_ORDER.indexOf(b.l.group) || a.i - b.i).map((x) => x.l);
+  const selected=(o.layers??style.layers).filter(id=>['KICK','SUB','HAT_C','PERC1',...ATOM_LAYERS].includes(id)||new Rng(hash(P.seed,P.style,id,'allocation')).next()<0.65+0.35*P.density);
+  const defs = selected.map((id, i) => ({ l: LAYERS[id], i })).sort((a, b) => GROUP_ORDER.indexOf(a.l.group) - GROUP_ORDER.indexOf(b.l.group) || a.i - b.i).map((x) => x.l);
   const tracks: Track[] = defs.map((l) => ({
     id: `t_${l.id}`, layer: l.id, name: l.name, color: l.color, group: l.group, synth: l.synth, vol: l.vol, pan: l.pan,
     mute: false, solo: false, lock: false, sc: l.sc, rev: l.rev, del: l.del, cutoff: 0.5, res: 0.3, clips: [],
@@ -404,8 +413,8 @@ export function generate(P: ComposeParams, o: GenOpts = {}): GenResult {
 
   const levels: Record<string, number[]> = {};
   for (const l of defs) {
-    levels[l.id] = sections.map((s) => layerLevel(s, l, style, P, overrides));
-    sections.forEach((s, i) => { s.levels[l.id] = +levels[l.id][i].toFixed(2); });
+    levels[l.id] = sections.map((s) => layerLevel(s, l, style, P, {...overrides,...(overrides[`${s.id}:t_${l.id}`]!==undefined?{[`${s.id}:${l.id}`]:overrides[`${s.id}:t_${l.id}`]}:{})}));
+    sections.forEach((s, i) => { s.levels[l.id] = +levels[l.id][i].toFixed(2); s.levels[`t_${l.id}`]=s.levels[l.id]; });
   }
   if (o.rig) return { sections, tracks, auto: [], formId };
 
@@ -481,6 +490,10 @@ export function generate(P: ComposeParams, o: GenOpts = {}): GenResult {
     addTransition(tracks, style, B, d, sec.bars, new Rng(hash(P.seed, 'tr', si, secSeed[sec.id] ?? 0)));
   });
 
+  const scoreEnd=sections.reduce((end,s)=>Math.max(end,s.start+s.bars),0);
+  for(const t of tracks){
+    t.clips=t.clips.filter(c=>c.start<scoreEnd).map((c,i)=>({...c,len:Math.min(c.len,scoreEnd-c.start),id:`generated_${P.seed}_${t.id}_${c.start}_${c.len}_${i}`}));
+  }
   // 5) automation
   const auto = genAuto(tracks, sections, P, levels);
   return { sections, tracks, auto, formId };
@@ -489,57 +502,72 @@ export function generate(P: ComposeParams, o: GenOpts = {}): GenResult {
 export function newProject(P: ComposeParams, o: GenOpts = {}, name?: string): Project {
   const g = generate(P, o);
   return {
-    v: 1, name: name ?? `${STYLES[P.style].name} · ${P.seed}`, params: P, formId: g.formId, sections: g.sections, tracks: g.tracks, auto: g.auto,
+    v: 1, id: uid('project'), revision: 1, name: name ?? `${STYLES[P.style].name} · ${P.seed}`, params: P, formId: g.formId, sections: g.sections, tracks: g.tracks, auto: g.auto,
     sc: defaultSc(), scOn: true, overrides: o.overrides ?? {}, secSeed: o.secSeed ?? {}, loop: { on: false, a: 0, b: 0 },
   };
 }
 
+const overlaps = (c:Clip,s:Section)=>c.start<s.start+s.bars&&c.start+c.len>s.start;
 const inRange = (bar: number, s: Section) => bar >= s.start - 1e-6 && bar < s.start + s.bars - 1e-6;
 
 /** Merge a freshly generated result into an existing project, protecting locks, mixer state and manual tracks. */
 export function mergeGenerated(old: Project, gen: GenResult, keepStructure: boolean): Pick<Project, 'tracks' | 'auto' | 'sections' | 'formId'> {
   const lockedSecs = keepStructure ? old.sections.filter((s) => s.lock) : [];
   const tracks: Track[] = gen.tracks.map((nt) => {
-    const ot = old.tracks.find((t) => t.layer === nt.layer);
+    const ot = old.tracks.find((t) => t.id === nt.id);
     if (!ot) return nt;
     if (ot.lock) return ot;
     let clips = nt.clips;
-    if (lockedSecs.length) clips = [...nt.clips.filter((c) => !lockedSecs.some((s) => inRange(c.start, s))), ...ot.clips.filter((c) => lockedSecs.some((s) => inRange(c.start, s)))];
+    if (lockedSecs.length) clips = [...nt.clips.filter((c) => !lockedSecs.some((s) => overlaps(c, s))), ...ot.clips.filter((c) => lockedSecs.some((s) => overlaps(c, s)))];
     return { ...ot, clips };
   });
-  for (const ot of old.tracks) if (!gen.tracks.some((t) => t.layer === ot.layer)) tracks.push(ot);
+  for (const ot of old.tracks) if (!gen.tracks.some((t) => t.id === ot.id)) tracks.push(ot);
   const lockedIds = new Set(tracks.filter((t) => t.lock).map((t) => t.id));
-  const auto = [
+  const auto = lockedSecs.length ? old.auto : [
     ...gen.auto.filter((a) => !lockedIds.has(a.track)),
     ...old.auto.filter((a) => lockedIds.has(a.track) || (a.track !== 'master' && !gen.tracks.some((t) => t.id === a.track))),
   ];
-  const sections = keepStructure ? gen.sections.map((s) => { const o = old.sections.find((x) => x.id === s.id); return o ? { ...s, lock: o.lock } : s; }) : gen.sections;
+  const sections = keepStructure ? gen.sections.map((s) => { const o = old.sections.find((x) => x.id === s.id); return o?.lock ? o : o ? { ...s, lock: o.lock } : s; }) : gen.sections;
   return { tracks, auto, sections, formId: gen.formId };
 }
 
 /** Re-roll one section (or a single layer inside it) without touching anything else. */
 export function regenSection(old: Project, secId: string, layerOnly?: string): Pick<Project, 'tracks' | 'auto' | 'secSeed'> {
-  const sec = old.sections.find((s) => s.id === secId)!;
+  const sec = old.sections.find((s) => s.id === secId);
+  if(!sec)throw new Error('Missing section');
+  if(sec.lock)throw new Error('Section locked');
+  const protectedSecs=old.sections.filter(s=>s.lock);
   const secSeed = { ...old.secSeed, [secId]: (old.secSeed[secId] ?? 0) + 1 };
   const gen = generate(old.params, { sections: old.sections, secSeed, overrides: old.overrides });
   const tracks = old.tracks.map((ot) => {
     if (ot.lock) return ot;
-    if (layerOnly && ot.layer !== layerOnly) return ot;
-    const nt = gen.tracks.find((t) => t.layer === ot.layer);
+    if (layerOnly && ot.id !== layerOnly && ot.layer !== layerOnly) return ot;
+    let nt = gen.tracks.find((t) => t.id === ot.id);
+    if(!nt && layerOnly===ot.id && Object.prototype.hasOwnProperty.call(LAYERS,ot.layer)) {
+      const instanceOverrides={...old.overrides};
+      if(instanceOverrides[`${secId}:${ot.id}`]!==undefined)instanceOverrides[`${secId}:${ot.layer}`]=instanceOverrides[`${secId}:${ot.id}`];
+      const candidate=generate({...old.params,seed:hash(old.params.seed,ot.id),density:1},{layers:[ot.layer],sections:old.sections,secSeed,overrides:instanceOverrides}).tracks.find(t=>t.layer===ot.layer);
+      if(candidate)nt={...candidate,id:ot.id,clips:candidate.clips.map(c=>({...c,id:`${ot.id}_${c.id}`}))};
+    }
     if (!nt) return ot;
-    const keep = ot.clips.filter((c) => !inRange(c.start, sec));
-    const add = nt.clips.filter((c) => inRange(c.start, sec));
+    const keepTrack={...ot,clips:structuredClone(ot.clips.filter(c=>!protectedSecs.some(s=>overlaps(c,s))))};
+    carve(keepTrack,sec.start,sec.start+sec.bars);
+    const keep=[...keepTrack.clips,...ot.clips.filter(c=>protectedSecs.some(s=>overlaps(c,s)))];
+    const add = nt.clips.filter(c=>overlaps(c,sec)&&!protectedSecs.some(s=>overlaps(c,s))).map(c=>{
+      const start=Math.max(sec.start,c.start),end=Math.min(sec.start+sec.bars,c.start+c.len);
+      return {...c,id:`regen_${secSeed[secId]}_${c.id}`,start,len:end-start,off:(c.off+(start-c.start)*16)%c.loop};
+    });
     return { ...ot, clips: [...keep, ...add].sort((a, b) => a.start - b.start) };
   });
   const auto: AutoLane[] = old.auto.map((lane) => {
     const g = gen.auto.find((a) => a.id === lane.id);
     if (!g || old.tracks.find((t) => t.id === lane.track)?.lock) return lane;
-    if (layerOnly && old.tracks.find((t) => t.id === lane.track)?.layer !== layerOnly) return lane;
+    if (layerOnly && lane.track !== layerOnly && old.tracks.find((t) => t.id === lane.track)?.layer !== layerOnly) return lane;
     const pts = [...lane.pts.filter((p) => !inRange(p.bar, sec)), ...g.pts.filter((p) => inRange(p.bar, sec))];
     return { ...lane, pts: cleanPts(pts) };
   });
   for (const g of gen.auto) if (!auto.some((a) => a.id === g.id)) auto.push(g);
-  return { tracks, auto, secSeed };
+  return { tracks, auto:protectedSecs.length?old.auto:auto, secSeed };
 }
 
 export function sectionLayers(style: string) { return STYLES[style].layers.filter((l) => !ATOM_LAYERS.includes(l)); }

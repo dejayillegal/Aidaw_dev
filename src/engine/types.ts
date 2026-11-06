@@ -96,6 +96,8 @@ export interface ComposeParams {
 
 export interface Project {
   v: 1;
+  id: string;
+  revision: number;
   name: string;
   params: ComposeParams;
   formId: string;

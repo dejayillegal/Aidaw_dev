@@ -25,7 +25,7 @@ export function Btn({ children, onClick, active, tone = 'default', className, ti
     ghost: 'bg-transparent border-transparent hover:bg-elev text-slate-300',
   };
   return (
-    <button title={title} aria-label={title} disabled={disabled} onClick={onClick}
+    <button title={title} aria-label={title} aria-pressed={active} disabled={disabled} onClick={onClick}
       className={cn('inline-flex items-center justify-center gap-1 rounded-md border px-2 transition-colors disabled:opacity-40 disabled:pointer-events-none select-none', small ? 'h-6 text-[10px]' : 'h-8 text-[11px]', tones[tone], active && 'ring-1 ring-amber !border-amber text-amber', className)}>
       {children}
     </button>

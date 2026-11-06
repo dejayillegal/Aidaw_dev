@@ -1,3 +1,4 @@
+import { uid } from '../engine/theory';
 import { useEffect, useRef } from 'react';
 import { engine, store, useApp } from '../store';
 import { LAYERS, ROLE_COLORS, ROLE_NAMES } from '../engine/styles';
@@ -55,8 +56,8 @@ export function Inspect() {
           <div className="mt-2 flex flex-wrap gap-1">
             <Btn small active={s.lock} onClick={() => store.dispatch({ type: 'SET_SECTION', id: s.id, patch: { lock: !s.lock } }, 'Lock section')}>🔒 Lock</Btn>
             <Btn small disabled={s.lock} onClick={() => regenerateSectionNow(s.id)}>↻ Regenerate</Btn>
-            <Btn small tone="cyan" onClick={() => store.addProposal(actRegenSection(p, s.id, 'darker'))}>AI: darker</Btn>
-            <Btn small tone="cyan" onClick={() => store.addProposal(actRegenSection(p, s.id, 'harder'))}>AI: harder</Btn>
+            <Btn small tone="cyan" onClick={() => store.propose(() => actRegenSection(p, s.id, 'darker'))}>AI: darker</Btn>
+            <Btn small tone="cyan" onClick={() => store.propose(() => actRegenSection(p, s.id, 'harder'))}>AI: harder</Btn>
             <Btn small onClick={() => store.dispatch({ type: 'SET_LOOP', loop: { on: true, a: s.start, b: s.start + s.bars } }, 'Loop section')}>Loop</Btn>
           </div>
         </Section>
@@ -71,14 +72,14 @@ export function Inspect() {
         <Section title="Active layer mask">
           <div className="space-y-0.5">
             {layers.map((t) => {
-              const lv = s.levels[t.layer] ?? 0; const key = `${s.id}:${t.layer}`; const ov = p.overrides[key];
+              const lv = s.levels[t.id] ?? s.levels[t.layer] ?? 0; const key = `${s.id}:${t.id}`; const ov = p.overrides[key];
               return (
                 <div key={t.id} className="flex items-center gap-1.5 text-[10px]">
                   <span className="w-24 truncate" style={{ color: t.color }}>{t.name}</span>
                   <div className="h-2 flex-1 overflow-hidden rounded-full bg-[#0e1216]"><div className="h-full rounded-full" style={{ width: `${lv * 100}%`, background: t.color }} /></div>
                   <span className="w-7 text-right font-mono text-slate-400">{Math.round(lv * 100)}</span>
                   {([['off', 0], ['½', 0.45], ['full', 1], ['auto', null]] as const).map(([lab, v]) => (
-                    <button key={lab} disabled={s.lock} onClick={() => setLayerLevel(s.id, t.layer, v)} className={`h-4 rounded px-1 text-[8px] ${(v === null ? ov === undefined : ov === v) ? 'bg-amber text-black' : 'bg-[#232b35] text-slate-400 hover:text-white'}`}>{lab}</button>
+                    <button key={lab} disabled={s.lock || t.lock} onClick={() => setLayerLevel(s.id, t.id, v)} className={`h-4 rounded px-1 text-[8px] ${(v === null ? ov === undefined : ov === v) ? 'bg-amber text-black' : 'bg-[#232b35] text-slate-400 hover:text-white'}`}>{lab}</button>
                   ))}
                 </div>
               );
@@ -98,7 +99,7 @@ export function Inspect() {
         <Section title="Track" right={<Badge color={t.color}>{t.group}</Badge>}>
           <input value={t.name} onChange={(e) => up({ name: e.target.value }, 'name')} aria-label="Track name" className="mb-2 h-8 w-full rounded-md border border-line bg-elev px-2 text-[12px] font-semibold" />
           <div className="mb-2 flex flex-wrap gap-1">
-            <Btn small active={t.mute} onClick={() => up({ mute: !t.mute }, 'mute')}>Mute</Btn><Btn small active={t.solo} onClick={() => up({ solo: !t.solo }, 'solo')}>Solo</Btn><Btn small active={t.lock} onClick={() => up({ lock: !t.lock }, 'lock')}>🔒 Lock (protect from AI)</Btn>
+            <Btn small active={t.mute} onClick={() => up({ mute: !t.mute }, 'mute')}>Mute</Btn><Btn small active={t.solo} onClick={() => up({ solo: !t.solo }, 'solo')}>Solo</Btn><Btn small active={t.lock} onClick={() => up({ lock: !t.lock }, 'lock')}>🔒 Lock edits</Btn>
           </div>
           <div className="text-[10px] text-slate-400">Synth: <b className="text-slate-200">{t.synth}</b> · Register: <b className="text-slate-200">{def?.reg ?? 'user'}</b></div>
         </Section>
@@ -154,7 +155,7 @@ export function Inspect() {
           <div className="mt-2 flex flex-wrap gap-1">
             <Btn small active={c.mute} onClick={() => up({ mute: !c.mute }, 'mute')}>Mute clip</Btn>
             <Btn small onClick={splitSelectedAtPlayhead} title="Ctrl/Cmd+E">Split @ playhead</Btn>
-            <Btn small onClick={() => store.dispatch({ type: 'DUP_CLIP', id: c.id }, 'Duplicate clip')} title="Ctrl/Cmd+D">Duplicate</Btn>
+            <Btn small onClick={() => store.dispatch({ type: 'DUP_CLIP', copyId: uid('clip'), id: c.id }, 'Duplicate clip')} title="Ctrl/Cmd+D">Duplicate</Btn>
             <Btn small tone="red" onClick={() => { store.dispatch({ type: 'DEL_CLIP', id: c.id }, 'Delete clip'); store.select({ kind: 'track', id: t.id }); }} title="Delete">Delete</Btn>
           </div>
           <div className="mt-2 text-[10px] text-slate-500">{c.notes.length} notes · open the Piano Roll tab to edit notes, accents and slides.</div>

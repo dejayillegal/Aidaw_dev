@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { engine, store, useApp } from '../store';
 import { KEY_NAMES, SCALE_NAMES } from '../engine/theory';
 import { Btn, Badge } from '../ui';
+import {ProjectFiles} from './ProjectFiles';
 import { seek } from '../actions';
 import { cn } from '../utils/cn';
 import { STYLES } from '../engine/styles';
@@ -32,11 +33,12 @@ export function TopBar({ onExport, compact }: { onExport: () => void; compact: b
   const canUndo = app.cursor > 0, canRedo = app.cursor < app.entries.length;
   return (
     <header className="relative z-50 flex h-12 shrink-0 items-center gap-2 border-b border-line bg-panel px-2">
-      <div className="flex items-center gap-1.5 pr-1"><div className="flex h-7 w-7 items-center justify-center rounded-md bg-amber font-black text-black">Ai</div>{!compact && <div className="leading-tight"><div className="text-[12px] font-bold tracking-wide">AIDAW</div><div className="max-w-[130px] truncate text-[9px] text-slate-500" title={p.name}>{p.name}</div></div>}</div>
+      <ProjectFiles compact={compact}/>
+      <div className={cn("items-center gap-1.5 pr-1",compact?"hidden":"flex")}><div className="flex h-7 w-7 items-center justify-center rounded-md bg-amber font-black text-black">Ai</div>{!compact && <div className="leading-tight"><div className="text-[12px] font-bold tracking-wide">AIDAW</div><div className="max-w-[130px] truncate text-[9px] text-slate-500" title={p.name}>{p.name}</div></div>}</div>
       <div className="flex items-center gap-1">
-        <Btn tone={app.playing ? 'amber' : 'default'} className="!h-9 w-10 text-[14px]" title="Play / Stop (Space)" onClick={() => store.toggle()}>{app.playing ? '■' : '▶'}</Btn>
-        <Btn className="!h-9" title="Return to start" onClick={() => seek(0)}>⏮</Btn>
-        <Btn className="!h-9" active={p.loop.on} title="Loop (select a section first, or toggle)" onClick={() => { const s = app.selection.kind === 'section' ? p.sections.find((x) => x.id === (app.selection as { id: string }).id) : undefined; if (p.loop.on) store.dispatch({ type: 'SET_LOOP', loop: { ...p.loop, on: false } }, 'Loop off'); else if (s) store.dispatch({ type: 'SET_LOOP', loop: { on: true, a: s.start, b: s.start + s.bars } }, 'Loop section'); else store.say('ai', 'Select a section flag first, then press Loop.'); }}>⟳</Btn>
+        <Btn tone={app.playing ? 'amber' : 'default'} className={compact?'!h-12 w-12 text-[14px]':'!h-9 w-10 text-[14px]'} title="Play / Stop (Space)" onClick={() => store.toggle()}>{app.playing ? '■' : '▶'}</Btn>
+        {!compact && <Btn className="!h-9" title="Return to start" onClick={() => seek(0)}>⏮</Btn>}
+        {!compact && <Btn className="!h-9" active={p.loop.on} title="Loop (select a section first, or toggle)" onClick={() => { const s = app.selection.kind === 'section' ? p.sections.find((x) => x.id === (app.selection as { id: string }).id) : undefined; if (p.loop.on) store.dispatch({ type: 'SET_LOOP', loop: { ...p.loop, on: false } }, 'Loop off'); else if (s) store.dispatch({ type: 'SET_LOOP', loop: { on: true, a: s.start, b: s.start + s.bars } }, 'Loop section'); else store.say('ai', 'Select a section flag first, then press Loop.'); }}>⟳</Btn>}
       </div>
       <div className="rounded-md border border-line bg-[#0b0e12] px-2 py-0.5 text-center"><div className="text-[8px] uppercase tracking-widest text-slate-500">bar.beat.16th</div><span ref={pos} className="font-mono text-[15px] font-semibold text-amber">001.1.1</span></div>
       {!compact && (
@@ -49,13 +51,13 @@ export function TopBar({ onExport, compact }: { onExport: () => void; compact: b
       )}
       <div className="ml-auto flex items-center gap-2">
         {!compact && (
-          <div className="hidden min-w-[200px] md:block" title="Audio engine health (callback load via scheduler time; XRun counting is not exposed by Web Audio)">
+          <div className="hidden min-w-[200px] md:block" title="Main-thread scheduling cost and output latency; audio callback CPU and XRun counts are not exposed by Web Audio">
             <div className="flex justify-between text-[8px] uppercase tracking-widest text-slate-500"><span>Engine</span><span>{engine.workletOk ? 'worklet sc' : engine.ctx ? 'fallback sc' : 'idle'}</span></div>
             <span ref={stat} className="block whitespace-nowrap font-mono text-[9px] text-slate-400">idle</span>
           </div>
         )}
-        <div className="w-20" title="Master peak (dBFS)"><div className="flex justify-between text-[8px] uppercase tracking-widest text-slate-500"><span>Peak</span><span ref={pk} className="font-mono text-slate-300">-∞</span></div><div className="h-2 overflow-hidden rounded-full bg-[#0b0e12]"><div ref={peak} className="h-full rounded-full" style={{ width: 0, background: 'linear-gradient(to right,#22c55e 65%,#f59e0b 88%,#ef4444)' }} /></div></div>
-        <Btn disabled={!canUndo} title="Undo (Ctrl+Z)" onClick={() => store.undo()}>↶</Btn>
+        <div className={cn("w-20",compact&&"hidden")} title="Master peak (dBFS)"><div className="flex justify-between text-[8px] uppercase tracking-widest text-slate-500"><span>Peak</span><span ref={pk} className="font-mono text-slate-300">-∞</span></div><div className="h-2 overflow-hidden rounded-full bg-[#0b0e12]"><div ref={peak} className="h-full rounded-full" style={{ width: 0, background: 'linear-gradient(to right,#22c55e 65%,#f59e0b 88%,#ef4444)' }} /></div></div>
+        {!compact && <><Btn disabled={!canUndo} title="Undo (Ctrl+Z)" onClick={() => store.undo()}>↶</Btn>
         <Btn disabled={!canRedo} title="Redo (Ctrl+Shift+Z)" onClick={() => store.redo()}>↷</Btn>
         <div className="relative">
           <Btn active={hist} title="Undo history" onClick={() => setHist(!hist)}>History{app.entries.length ? ` ${app.cursor}/${app.entries.length}` : ''}</Btn>
@@ -71,7 +73,8 @@ export function TopBar({ onExport, compact }: { onExport: () => void; compact: b
             </div>
           )}
         </div>
-        <Btn tone="amber" title="Export WAV (offline render)" onClick={onExport}>Export</Btn>
+        </>}
+        <Btn tone="amber" className={compact?'!h-12':undefined} title="Export WAV (offline render)" onClick={onExport}>Export</Btn>
       </div>
     </header>
   );
