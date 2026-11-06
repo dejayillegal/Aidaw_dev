@@ -15,7 +15,7 @@ This branch implements the first recovery and integrity increments of the approv
 
 ## Evidence
 
-`npm run check` executes strict TypeScript, Vitest and Vite production build. The suite includes a 200-project exact-duration corpus (8 styles × 5 durations × 5 seeds), plus command, persistence, regeneration, scheduler, WAV and sidechain-kernel regression cases. Sidechain tests execute the actual processor source with a test AudioWorklet host; they are not browser/audio-device measurements. Scheduler tests isolate event/parameter semantics, not full real-time performance.
+`npm run check` passed with strict TypeScript, 39 tests across nine files, and the Vite 7.3.7 production build. `npm audit --json` reported zero vulnerabilities after upgrading Vite to 7.3.7 and its esbuild dependency to 0.28.2. Node v24.22.1 and npm 11.9.0 were used. The suite includes a 200-project exact-duration corpus (8 styles × 5 durations × 5 seeds), plus command, persistence, regeneration, scheduler, WAV and sidechain-kernel regression cases. Sidechain tests execute the actual processor source with a test AudioWorklet host; they are not browser/audio-device measurements. Scheduler tests isolate event/parameter semantics, not full real-time performance.
 
 Failing tests were recorded before the relevant repairs, including the broken imports, invalid transactions, duplicate/missing IDs, locked-span edits, replay-ID drift, incomplete articulation diffs, antiphase detector cancellation, wrong duration, dropped duplicate-family tracks, nonfinite/float/integer WAV defects, deleted automation, crossing-clip loss, negative microtiming and event-expansion limits.
 
