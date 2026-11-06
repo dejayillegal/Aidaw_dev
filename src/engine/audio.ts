@@ -2,10 +2,13 @@ import type { AutoLane, Project, ScGroup, SynthKind, Track } from './types';
 import { STEPS_PER_BAR, totalBars } from './types';
 import { clamp, lerp, Rng, hash } from './theory';
 import { makeNoise, playVoice, type TrackCtl, type VEnv } from './voices';
-import { inspectWav } from './wavVerification';
+import { inspectWavAsync } from './wavVerification';
+import { encodeWavAsync } from './wavEncoding';
+export { encodeWav } from './wavEncoding';
 import { assertProject } from './validation';
 import {expandTrackEvents,needsSidechainKey} from './musicalEvents';
 import { SC_WORKLET_SRC } from './worklet';
+import {renderOfflineWindows} from './offlineWindows';
 
 const GROUPS: ScGroup[] = ['bass', 'harm', 'fx'];
 export const stepDurOf = (bpm: number) => 60 / bpm / 4;
@@ -357,26 +360,19 @@ export type ExportState = 'IDLE' | 'VALIDATING' | 'PREPARING' | 'RENDERING' | 'P
 export interface ExportResult { blob: Blob; peakDb: number; rmsDb: number; frames: number; seconds: number; sc: 'worklet' | 'fallback'; expectedFrames: number }
 export interface ExportOpts { sampleRate: number; bits: 16 | 24 | 32; onState: (s: ExportState, progress: number, msg?: string) => void; cancelled: () => boolean; allowDegradedSidechain?:boolean }
 
-export function encodeWav(buf: AudioBuffer, bits: 16 | 24 | 32): Blob {
-  const ch = buf.numberOfChannels, n = buf.length, bps = bits / 8; const data = new ArrayBuffer(44 + n * ch * bps); const v = new DataView(data);
-  const w = (o: number, s: string) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
-  w(0, 'RIFF'); v.setUint32(4, 36 + n * ch * bps, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, bits === 32 ? 3 : 1, true); v.setUint16(22, ch, true);
-  v.setUint32(24, buf.sampleRate, true); v.setUint32(28, buf.sampleRate * ch * bps, true); v.setUint16(32, ch * bps, true); v.setUint16(34, bits, true); w(36, 'data'); v.setUint32(40, n * ch * bps, true);
-  const chans = Array.from({ length: ch }, (_, c) => buf.getChannelData(c)); let o = 44;
-  for (let i = 0; i < n; i++) for (let c = 0; c < ch; c++) {
-    const sample=chans[c][i];
-    if(!Number.isFinite(sample))throw new Error('Nonfinite audio sample');
-    const x = bits===32?sample:Math.max(-1, Math.min(1, sample));
-    if (bits === 16) { v.setInt16(o, Math.round(x * (x<0?32768:32767)), true); o += 2; }
-    else if (bits === 24) { const s = Math.round(x * (x<0?8388608:8388607)); v.setUint8(o, s & 255); v.setUint8(o + 1, (s >> 8) & 255); v.setUint8(o + 2, (s >> 16) & 255); o += 3; }
-    else { v.setFloat32(o, chans[c][i], true); o += 4; }
-  }
-  return new Blob([data], { type: 'audio/wav' });
-}
-
 export async function renderWav(p: Project, o: ExportOpts): Promise<ExportResult> {
+  try{
+    const result=await renderWavSnapshot(p,o);
+    if(o.cancelled())throw new Error('CANCELLED');
+    o.onState('COMPLETED',1);return result;
+  }catch(error){
+    o.onState(error instanceof Error&&error.message==='CANCELLED'?'CANCELLED':'FAILED',0);
+    throw error;
+  }
+}
+async function renderWavSnapshot(source:Project,o:ExportOpts):Promise<ExportResult>{
   o.onState('VALIDATING', 0);
-  assertProject(p);
+  assertProject(source);const p=structuredClone(source);
   if(o.cancelled())throw new Error('CANCELLED');
   if(![44100,48000,96000].includes(o.sampleRate)||![16,24,32].includes(o.bits))throw new Error('Unsupported export format');
   const bars = totalBars(p);
@@ -389,36 +385,31 @@ export async function renderWav(p: Project, o: ExportOpts): Promise<ExportResult
   const ctx = new OfflineAudioContext(2, frames, sr);
   let wk = false;
   try { const url = URL.createObjectURL(new Blob([SC_WORKLET_SRC], { type: 'application/javascript' })); try{await ctx.audioWorklet.addModule(url);wk=true;}finally{URL.revokeObjectURL(url);} } catch { wk = false; }
-  if(!wk&&p.scOn&&p.tracks.some(t=>t.sc&&t.clips.length)&&!o.allowDegradedSidechain)throw new Error('Required sidechain AudioWorklet unavailable for export. Disable sidechain explicitly or use a supported browser.');
+  if(o.cancelled())throw new Error('CANCELLED');
+  if(!wk&&needsSidechainKey(p)&&!o.allowDegradedSidechain)throw new Error('Required sidechain AudioWorklet unavailable for export. Disable sidechain explicitly or use a supported browser.');
   const graph = new Graph(ctx, wk, undefined, false,p.params.seed); const sched = new Scheduler(graph);
-  graph.sync(p);
-  sched.scheduleAutomation(p, 0, 0, true);
-  const WIN = 64; const nWin = Math.ceil((bars * STEPS_PER_BAR) / WIN); const total = bars * STEPS_PER_BAR; const mapT = (s: number) => s * sd;
-  const win = (k: number) => { const a = k * WIN, b = Math.min(total, (k + 1) * WIN); if (a < total) sched.scheduleWindow(p, a, b, mapT); };
-  win(0); win(1);
-  let cancelled = false;
-  o.onState('RENDERING', 0);
-  for (let k = 1; k < nWin; k++) {
-    const tt = Math.ceil((k * WIN * sd * sr) / 128) * 128 / sr;
-    ctx.suspend(tt).then(() => {
-      if (o.cancelled()) {cancelled = true;graph.kill();}
-      if(!cancelled)win(k + 1); o.onState('RENDERING', k / nWin); ctx.resume();
-    }).catch(() => { /* suspend past end */ });
-  }
   let buf:AudioBuffer;
-  try{buf=await ctx.startRendering();}finally{graph.kill();}
-  if (cancelled || o.cancelled()) throw new Error('CANCELLED');
-  o.onState('PROCESSING', 1);
-  let peak = 0, sum = 0; const L = buf.getChannelData(0), R = buf.getChannelData(1);
-  for (let i = 0; i < buf.length; i++) { if(!Number.isFinite(L[i])||!Number.isFinite(R[i]))throw new Error('Nonfinite rendered audio');const a = Math.abs(L[i]), b = Math.abs(R[i]); if (a > peak) peak = a; if (b > peak) peak = b; sum += L[i] * L[i] + R[i] * R[i]; }
-  const rms = Math.sqrt(sum / (buf.length * 2));
-  o.onState('ENCODING', 1);
-  const blob = encodeWav(buf, o.bits);
-  o.onState('SAVING', 1);
-  o.onState('VERIFYING', 1);
-  if (rms < 1e-5) throw new Error('Verification failed: rendered audio is silent.');
-  const decoded=inspectWav(await blob.arrayBuffer());
-  if(decoded.frames!==frames||decoded.sampleRate!==sr||decoded.channels!==2||decoded.bits!==o.bits||decoded.rms<1e-5)throw new Error('Encoded WAV verification failed');
-  peak=decoded.peak;const encodedRms=decoded.rms;
+  try{
+    graph.sync(p);sched.scheduleAutomation(p,0,0,true);o.onState('RENDERING',0);
+    const total=bars*STEPS_PER_BAR;
+    buf=await renderOfflineWindows(ctx,total,sd,(a,b)=>{
+      if(graph.failure)throw new Error(graph.failure);
+      sched.scheduleWindow(p,a,b,s=>s*sd,false,total);
+    },o.cancelled,progress=>o.onState('RENDERING',progress),()=>graph.kill());
+    if(graph.failure)throw new Error(graph.failure);
+  }finally{graph.kill();}
+  if(o.cancelled())throw new Error('CANCELLED');
+  o.onState('PROCESSING', 0);
+  if(o.cancelled())throw new Error('CANCELLED');
+  if(buf.length!==frames||buf.sampleRate!==sr||buf.numberOfChannels!==2)throw new Error('Rendered audio format or frame count mismatch');
+  o.onState('PROCESSING',1);
+  o.onState('ENCODING',0);
+  const blob=await encodeWavAsync(buf,o.bits,{cancelled:o.cancelled,progress:f=>o.onState('ENCODING',f)});
+  o.onState('SAVING',1);
+  o.onState('VERIFYING',0);
+  const decoded=await inspectWavAsync(await blob.arrayBuffer(),{cancelled:o.cancelled,progress:f=>o.onState('VERIFYING',f)});
+  if(decoded.frames!==frames||decoded.sampleRate!==sr||decoded.channels!==2||decoded.bits!==o.bits)throw new Error('Encoded WAV verification failed');
+  if(decoded.rms<1e-5)throw new Error('Verification failed: rendered audio is silent.');
+  const peak=decoded.peak,encodedRms=decoded.rms;
   return { blob, peakDb: 20 * Math.log10(peak + 1e-9), rmsDb: 20 * Math.log10(encodedRms + 1e-9), frames: buf.length, seconds: buf.length / sr, sc: wk ? 'worklet' : 'fallback', expectedFrames: frames };
 }

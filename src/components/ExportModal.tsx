@@ -9,22 +9,27 @@ const STEPS: ExportState[] = ['VALIDATING', 'PREPARING', 'RENDERING', 'PROCESSIN
 export function ExportModal({ onClose }: { onClose: () => void }) {
   const [sr, setSr] = useState(44100); const [bits, setBits] = useState<16 | 24 | 32>(24);
   const [state, setState] = useState<ExportState>('IDLE'); const [prog, setProg] = useState(0); const [err, setErr] = useState(''); const [res, setRes] = useState<ExportResult | null>(null);
-  const cancel = useRef(false); const url = useRef('');
-  useEffect(()=>()=>{cancel.current=true;if(url.current)URL.revokeObjectURL(url.current);},[]);
+  const [name,setName]=useState('');
+  const cancel = useRef(false); const url = useRef('');const active=useRef(false),mounted=useRef(true);
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;cancel.current=true;if(url.current)URL.revokeObjectURL(url.current);};},[]);
   const busy = state !== 'IDLE' && state !== 'COMPLETED' && state !== 'FAILED' && state !== 'CANCELLED';
 
   const start = async () => {
+    if(active.current)return;active.current=true;
     cancel.current = false; setErr(''); setRes(null); store.stop();
+    if(url.current){URL.revokeObjectURL(url.current);url.current='';}
+    const project=store.get().project,rate=sr,depth=bits;
+    const fileName=`${project.name.replace(/[^\w.-]+/g, '_')}_${rate / 1000}k_${depth}${depth === 32 ? 'f' : ''}.wav`;
     try {
-      const r = await renderWav(store.get().project, { sampleRate: sr, bits, cancelled: () => cancel.current, onState: (s, p) => { setState(s); setProg(p); } });
-      if (url.current) URL.revokeObjectURL(url.current);
-      url.current = URL.createObjectURL(r.blob); setRes(r); setState('COMPLETED'); setProg(1);
+      const r = await renderWav(project, { sampleRate: rate, bits:depth, cancelled: () => cancel.current, onState: (s, p) => { if(mounted.current){setState(s); setProg(p);} } });
+      if(!mounted.current||cancel.current)return;
+      url.current = URL.createObjectURL(r.blob);setName(fileName);setRes(r);setState('COMPLETED');setProg(1);
     } catch (e) {
+      if(!mounted.current)return;
       const m = e instanceof Error ? e.message : String(e);
       if (m === 'CANCELLED') setState('CANCELLED'); else { setState('FAILED'); setErr(m); }
-    }
+    }finally{active.current=false;}
   };
-  const name = `${store.get().project.name.replace(/[^\w.-]+/g, '_')}_${sr / 1000}k_${bits}${bits === 32 ? 'f' : ''}.wav`;
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-3" onClick={() => !busy && onClose()}>
